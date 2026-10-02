@@ -1,0 +1,35 @@
+
+Enter file contents here
+name: Sync fork with upstream
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge upstream into main (merge-only, never deletes)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="main"
+          echo "Target branch: ${branch}"
+          if gh api -X POST \
+              "repos/${{ github.repository }}/merge-upstream" \
+              -f "branch=${branch}" --jq '.status' > /tmp/result.txt 2>/tmp/err.txt; then
+            echo "Sync result: $(cat /tmp/result.txt)"
+          else
+            echo "::error::Sync skipped. Upstream may be deleted or branch unchanged. Fork untouched."
+            cat /tmp/err.txt
+            exit 1
+          fi
