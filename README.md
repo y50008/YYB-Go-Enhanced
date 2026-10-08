@@ -1,8 +1,11 @@
 # YYB Go Enhanced
 
+[![给项目点个 Star](https://img.shields.io/github/stars/525815266/YYB-Go-Enhanced?style=social&label=Star)](https://github.com/525815266/YYB-Go-Enhanced)
 [![Release](https://img.shields.io/github/v/release/525815266/YYB-Go-Enhanced?display_name=tag)](https://github.com/525815266/YYB-Go-Enhanced/releases)
 [![Docker](https://github.com/525815266/YYB-Go-Enhanced/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/525815266/YYB-Go-Enhanced/actions/workflows/docker-publish.yml)
 [![Go Release](https://github.com/525815266/YYB-Go-Enhanced/actions/workflows/release.yml/badge.svg)](https://github.com/525815266/YYB-Go-Enhanced/actions/workflows/release.yml)
+
+如果你喜欢这个项目，欢迎点击仓库右上角的 ⭐ **Star**，支持持续更新！
 
 面向自托管环境的应用宝协议服务与微信账号管理平台。提供微信扫码登录、账号与 OpenID 管理、`wx.login` code 获取、凭据续期、账号独立代理，以及青龙、呆呆和 Arcadia 面板接入。
 
@@ -43,9 +46,11 @@
 | Magisk | Android ARM64 设备常驻运行，不依赖 Termux | [Magisk 文档](docs/magisk.md) |
 | 原生二进制 | Linux、Windows、macOS 独立运行 | [Releases](https://github.com/525815266/YYB-Go-Enhanced/releases) |
 
+原生程序 v0.2.25 起支持自动读取程序旁的 `.env`，也可通过 `-env-file` 指定配置；Windows 不再需要逐项设置系统环境变量。具体用法见[配置方式](docs/configuration.md#配置方式)。
+
 ## Docker Compose 快速开始
 
-环境需要 Docker、Docker Compose v2，以及供面板互通的 `qinglong_default` 网络。
+环境需要 Docker、Docker Compose v2，以及供面板互通的用户自建网络。默认拉取官方 `linux/amd64` / `linux/arm64` 镜像，Armbian 盒子无需在本机编译。以下是**首次安装**步骤：
 
 ```bash
 git clone https://github.com/525815266/YYB-Go-Enhanced.git
@@ -55,10 +60,21 @@ docker network inspect qinglong_default >/dev/null 2>&1 || \
   docker network create qinglong_default
 
 cp .env.example .env
-docker compose up -d --build
+docker compose pull yyb-go
+
+# 初始化映射目录，使容器的非 root 用户能够写入数据库、头像和二维码
+mkdir -p data/db data/avatars data/qr
+docker run --rm --user 0 --entrypoint sh \
+  -v "$PWD/data:/data" ghcr.io/525815266/yyb-go-enhanced:latest \
+  -c 'chown -R yyb:yyb /data/db /data/avatars /data/qr && chmod -R u+rwX /data/db /data/avatars /data/qr'
+docker compose up -d --no-build
 ```
 
 打开 `http://服务器IP:8000`。未预设管理员时，第一个注册用户自动成为管理员。
+
+青龙也需要加入同一个用户自建网络；容器叫 `qinglong` 不代表网络也叫这个名字。若青龙目前只有 Docker 默认的 `bridge` 网络，可执行 `docker network connect qinglong_default qinglong`（最后一项替换为实际容器名）。已有其他网络时，在 `.env` 设置 `YYB_DOCKER_NETWORK=实际网络名`。青龙重建时还需在其 Compose 中保留该网络，详见 [Armbian / Docker 部署排错](docs/docker-deployment.md)。
+
+后续更新使用 `docker compose pull yyb-go && docker compose up -d --no-build`；保留原 `.env` 和 `data`。开发者仍可选择 `docker compose up -d --build` 源码构建，构建测试保持启用。
 
 默认使用 SQLite，无需额外数据库：
 
@@ -160,7 +176,7 @@ curl -X POST http://yyb-go:8000/wxapp/getCode \
 
 管理员可点击控制台顶栏版本号检查新版本。系统会识别当前运行环境：Windows、Linux、macOS 裸机提供匹配架构的 Release 下载，Magisk 提供模块 ZIP；Docker 仅在维护执行器已连接时提供在线更新和重启。
 
-v0.2.23 增加官方 Release 备用查询，改善 Raw / API 同时失败时的版本检查。遇到连接重置或 403，请按[更新网络排错](docs/maintenance.md#检查更新报连接重置或-http-403issue-74)检查 YYB 容器出口；Docker 拉取镜像使用宿主机的独立网络配置。
+v0.2.24 根据 #74 的反馈，增加仅供版本检查使用的 `YYB_UPDATE_PROXY` 和可选的 `YYB_UPDATE_VERSION_URL`，并修复前端过早取消备用查询的问题。默认仍使用官方 Raw / API / Release 来源，不内置第三方镜像。遇到连接重置或 403，请按[更新网络排错](docs/maintenance.md#检查更新报连接重置或-http-403issue-74)检查容器到宿主机代理的可达性；Docker 拉取镜像使用宿主机的独立网络配置。感谢 @Xx1aoy1 提供 Armbian 实测排查过程。
 
 完整版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 

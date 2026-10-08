@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,6 +29,8 @@ import (
 
 type Config struct {
 	MaintenanceSocket string
+	UpdateProxy       string
+	UpdateVersionURL  string
 	ResourceRoot      string
 	EmbeddedWebAssets bool
 	DBFilename        string
@@ -77,13 +80,13 @@ type App struct {
 	qrSessions        map[string]*qrLoginSession
 	quickSessions     map[string]quickLoginSession
 	refreshLocksMu    sync.Mutex
-	refreshLocks      map[int64]*sync.Mutex
+	refreshLocks      map[int64]chan struct{}
 	loginMu           sync.Mutex
 	loginAttempts     map[string]loginAttempt
 	proxyMu           sync.Mutex
 	proxyLeases       map[int64]accountProxyLease
 	proxyLeaseLocksMu sync.Mutex
-	proxyLeaseLocks   map[int64]*sync.Mutex
+	proxyLeaseLocks   map[int64]chan struct{}
 	keepAliveRetryMu  sync.Mutex
 	keepAliveRetryAt  map[int64]time.Time
 	panelSyncMu       sync.Mutex
@@ -172,7 +175,7 @@ func NewApp(cfg Config) (*App, error) {
 	pool := protocol.NewPool(poolCfg, db)
 	qrClient := qr.NewClient(cfg.RequestTimeout)
 	app := &App{
-		updates:            &updateChecker{client: &http.Client{Timeout: 10 * time.Second}, url: maintenanceVersionURL, fallbackURL: maintenanceVersionAPIURL, releaseURL: maintenanceReleaseBase + "/latest"},
+		updates:            newUpdateChecker(cfg.UpdateProxy, cfg.UpdateVersionURL),
 		cfg:                cfg,
 		resources:          res,
 		db:                 db,
@@ -185,9 +188,9 @@ func NewApp(cfg Config) (*App, error) {
 		qrSessions:         map[string]*qrLoginSession{},
 		quickSessions:      map[string]quickLoginSession{},
 		loginAttempts:      map[string]loginAttempt{},
-		refreshLocks:       map[int64]*sync.Mutex{},
+		refreshLocks:       map[int64]chan struct{}{},
 		proxyLeases:        map[int64]accountProxyLease{},
-		proxyLeaseLocks:    map[int64]*sync.Mutex{},
+		proxyLeaseLocks:    map[int64]chan struct{}{},
 		keepAliveRetryAt:   map[int64]time.Time{},
 	}
 	authDriver := strings.ToLower(strings.TrimSpace(cfg.AuthDriver))
@@ -227,6 +230,9 @@ func NewApp(cfg Config) (*App, error) {
 }
 
 func (a *App) Close() error {
+	if a.updates != nil && a.updates.client != nil {
+		a.updates.client.CloseIdleConnections()
+	}
 	if a.keepAliveCancel != nil {
 		a.keepAliveCancel()
 		<-a.keepAliveDone
@@ -1231,6 +1237,9 @@ type accountExpiredError struct{ openid string }
 func (e accountExpiredError) Error() string { return "account expired: " + e.openid }
 
 func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID string, payload map[string]any, call wxappCall) (map[string]any, error) {
+	// Bound queueing, protocol login and any credential recovery together.
+	ctx, cancel := context.WithTimeout(ctx, a.cfg.RequestTimeout+35*time.Second)
+	defer cancel()
 	if accountStatus(acc) == "expired" {
 		return nil, accountExpiredError{openid: acc.OpenID}
 	}
@@ -1244,6 +1253,12 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 	result, callErr := call(ctx, acc, appID, payload, proxyValue, fallbackDirect)
 	if callErr == nil {
 		return result, nil
+	}
+	var networkErr net.Error
+	if ctx.Err() != nil || errors.Is(callErr, context.Canceled) || errors.Is(callErr, context.DeadlineExceeded) || errors.As(callErr, &networkErr) || errors.Is(callErr, io.EOF) || errors.Is(callErr, io.ErrUnexpectedEOF) {
+		// A failed transport does not establish that saved credentials expired.
+		// Preserve the session and original diagnostic; do not repeat a slow call.
+		return nil, callErr
 	}
 	_ = a.db.InvalidateSession(ctx, acc.ID, proxyValue)
 	status, refreshErr := a.refreshLivenessWithProxy(ctx, acc, proxyValue, fallbackDirect)

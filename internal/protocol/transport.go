@@ -64,11 +64,13 @@ func NewHTTPTransport(proxyValue string, fallbackDirect bool) (*http.Transport, 
 		if err != nil {
 			return nil, err
 		}
-		conn, err := dialViaProxy(ctx, proxy, host, port, 0)
+		// net/http may keep a dial alive after its initiating request is cancelled
+		// for connection reuse. Bound proxy negotiation even without a deadline.
+		conn, err := dialViaProxy(ctx, proxy, host, port, 30*time.Second)
 		if err == nil || !fallbackDirect {
 			return conn, err
 		}
-		return dialDirect(ctx, host, port, 0)
+		return dialDirect(ctx, host, port, 30*time.Second)
 	}
 	return transport, nil
 }
@@ -100,14 +102,18 @@ func dialDirect(ctx context.Context, host string, port int, timeout time.Duratio
 }
 
 func dialViaProxy(ctx context.Context, proxy *tcpProxy, targetHost string, targetPort int, timeout time.Duration) (net.Conn, error) {
+	// DialContext only covers TCP establishment. Proxy negotiation also performs
+	// blocking reads, so honour cancellation and the earlier request deadline.
+	deadline := ioDeadline(ctx, timeout)
 	conn, err := dialDirect(ctx, proxy.Host, mustAtoi(proxy.Port), timeout)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dial proxy failed: %w", err)
 	}
-	if timeout > 0 {
-		_ = conn.SetDeadline(time.Now().Add(timeout))
-		defer conn.SetDeadline(time.Time{})
+	if !deadline.IsZero() {
+		_ = conn.SetDeadline(deadline)
 	}
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancel()
 	if proxy.Scheme == "socks5" {
 		err = socks5Connect(conn, proxy, targetHost, targetPort)
 	} else {
@@ -115,9 +121,28 @@ func dialViaProxy(ctx context.Context, proxy *tcpProxy, targetHost string, targe
 	}
 	if err != nil {
 		_ = conn.Close()
-		return nil, err
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		return nil, fmt.Errorf("%s proxy handshake to %s failed: %w", proxy.Scheme, net.JoinHostPort(targetHost, strconv.Itoa(targetPort)), err)
 	}
+	if !stopCancel() {
+		_ = conn.Close()
+		return nil, ctx.Err()
+	}
+	_ = conn.SetDeadline(time.Time{})
 	return conn, nil
+}
+
+// A per-read timeout must never extend the enclosing operation's deadline.
+func ioDeadline(ctx context.Context, timeout time.Duration) time.Time {
+	deadline, hasDeadline := ctx.Deadline()
+	if timeout > 0 {
+		if limit := time.Now().Add(timeout); !hasDeadline || limit.Before(deadline) {
+			return limit
+		}
+	}
+	return deadline
 }
 
 func socks5Connect(conn net.Conn, proxy *tcpProxy, targetHost string, targetPort int) error {
