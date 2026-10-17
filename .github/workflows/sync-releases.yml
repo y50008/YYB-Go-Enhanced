@@ -21,47 +21,85 @@ jobs:
           set -e
           echo "Fetching upstream releases from $UPSTREAM..."
 
-          # Anonymous curl for upstream (GITHUB_TOKEN can't access other repos)
           RELEASES_JSON=$(curl -s "https://api.github.com/repos/$UPSTREAM/releases?per_page=100")
-          RELEASE_IDS=$(echo "$RELEASES_JSON" | jq -r '.[] | select(.draft == false) | .id')
+          RELEASE_COUNT=$(echo "$RELEASES_JSON" | jq 'length')
+          echo "Found $RELEASE_COUNT upstream releases"
 
-          for RID in $RELEASE_IDS; do
-            TAG=$(echo "$RELEASES_JSON" | jq -r ".[] | select(.id == $RID) | .tag_name")
-            NAME=$(echo "$RELEASES_JSON" | jq -r ".[] | select(.id == $RID) | .name // \"\"")
-            BODY=$(echo "$RELEASES_JSON" | jq -r ".[] | select(.id == $RID) | .body // \"\"")
-            PRERELEASE=$(echo "$RELEASES_JSON" | jq -r ".[] | select(.id == $RID) | .prerelease")
+          for i in $(seq 0 $((RELEASE_COUNT - 1))); do
+            RID=$(echo "$RELEASES_JSON" | jq -r ".[$i].id")
+            TAG=$(echo "$RELEASES_JSON" | jq -r ".[$i].tag_name")
+            NAME=$(echo "$RELEASES_JSON" | jq -r ".[$i].name // \"\"")
+            BODY=$(echo "$RELEASES_JSON" | jq -r ".[$i].body // \"\"")
+            PRERELEASE=$(echo "$RELEASES_JSON" | jq -r ".[$i].prerelease")
+            DRAFT=$(echo "$RELEASES_JSON" | jq -r ".[$i].draft")
 
-            EXISTS=$(gh api "repos/$FORK/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .id" || true)
-            if [ -n "$EXISTS" ]; then
-              echo "Release $TAG already exists in fork, skipping."
+            if [ "$DRAFT" = "true" ]; then
+              echo "Skipping draft $TAG"
               continue
             fi
 
-            echo "Creating release $TAG in fork..."
-            NEW_RELEASE=$(gh api "repos/$FORK/releases" \
-              -f tag_name="$TAG" \
-              -f name="$NAME" \
-              -f body="$BODY" \
-              -F prerelease="$PRERELEASE" \
-              -F generate_release_notes=false)
-            NEW_ID=$(echo "$NEW_RELEASE" | jq -r '.id')
+            EXISTING=$(curl -s -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/$FORK/releases/tags/$TAG")
+            EXISTING_ID=$(echo "$EXISTING" | jq -r '.id // empty')
 
-            echo "Syncing assets for $TAG..."
+            if [ -n "$EXISTING_ID" ]; then
+              echo "Release $TAG exists (id=$EXISTING_ID), syncing missing assets..."
+              NEW_ID="$EXISTING_ID"
+            else
+              echo "Creating release $TAG in fork..."
+              CREATE_BODY=$(jq -n \
+                --arg tag "$TAG" \
+                --arg name "$NAME" \
+                --arg body "$BODY" \
+                --argjson prerelease "$PRERELEASE" \
+                '{tag_name: $tag, name: $name, body: $body, prerelease: $prerelease, generate_release_notes: false}')
+              NEW_RELEASE=$(curl -s -X POST \
+                -H "Authorization: token $GH_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "$CREATE_BODY" \
+                "https://api.github.com/repos/$FORK/releases")
+              NEW_ID=$(echo "$NEW_RELEASE" | jq -r '.id // empty')
+              if [ -z "$NEW_ID" ]; then
+                echo "Failed to create release $TAG: $NEW_RELEASE"
+                continue
+              fi
+              echo "Created release $TAG (id=$NEW_ID)"
+            fi
+
             ASSETS_JSON=$(curl -s "https://api.github.com/repos/$UPSTREAM/releases/$RID/assets")
-            ASSET_IDS=$(echo "$ASSETS_JSON" | jq -r '.[].id')
+            ASSET_COUNT=$(echo "$ASSETS_JSON" | jq 'length')
+            echo "  Syncing $ASSET_COUNT assets for $TAG..."
 
-            for AID in $ASSET_IDS; do
-              ANAME=$(echo "$ASSETS_JSON" | jq -r ".[] | select(.id == $AID) | .name")
-              URL=$(echo "$ASSETS_JSON" | jq -r ".[] | select(.id == $AID) | .url")
-              echo "  Downloading $ANAME..."
+            FORK_ASSETS=$(curl -s -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/$FORK/releases/$NEW_ID/assets")
+            FORK_ASSET_NAMES=$(echo "$FORK_ASSETS" | jq -r '.[].name')
+
+            for j in $(seq 0 $((ASSET_COUNT - 1))); do
+              ANAME=$(echo "$ASSETS_JSON" | jq -r ".[$j].name")
+              URL=$(echo "$ASSETS_JSON" | jq -r ".[$j].url")
+
+              if echo "$FORK_ASSET_NAMES" | grep -q "^$ANAME$"; then
+                echo "    $ANAME already exists, skipping"
+                continue
+              fi
+
+              echo "    Downloading $ANAME..."
               curl -sL -H "Accept: application/octet-stream" "$URL" -o "/tmp/$ANAME"
-              echo "  Uploading $ANAME to fork release..."
-              gh api "repos/$FORK/releases/$NEW_ID/assets" \
-                -F name="$ANAME" \
-                -F data=@/tmp/$ANAME \
-                --jq '.name' || echo "  Failed to upload $ANAME"
+
+              echo "    Uploading $ANAME..."
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+                -H "Authorization: token $GH_TOKEN" \
+                -H "Content-Type: application/octet-stream" \
+                --data-binary "@/tmp/$ANAME" \
+                "https://uploads.github.com/repos/$FORK/releases/$NEW_ID/assets?name=$ANAME")
+
+              if [ "$HTTP_CODE" = "201" ]; then
+                echo "    Uploaded $ANAME"
+              else
+                echo "    Failed to upload $ANAME (HTTP $HTTP_CODE)"
+              fi
               rm -f "/tmp/$ANAME"
             done
-            echo "Release $TAG synced."
+            echo "  Release $TAG done."
           done
-          echo "Done."
+          echo "All done."
