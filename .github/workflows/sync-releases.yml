@@ -67,6 +67,10 @@ jobs:
             fi
 
             ASSETS_JSON=$(curl -s "https://api.github.com/repos/$UPSTREAM/releases/$RID/assets")
+            if ! echo "$ASSETS_JSON" | jq -e 'type == "array"' > /dev/null 2>&1; then
+              echo "  Assets API error for $TAG, skipping assets"
+              continue
+            fi
             ASSET_COUNT=$(echo "$ASSETS_JSON" | jq 'length')
             echo "  Syncing $ASSET_COUNT assets for $TAG..."
 
