@@ -20,29 +20,43 @@ jobs:
         run: |
           set -e
           echo "Fetching upstream releases from $UPSTREAM..."
-          RELEASES=$(gh api repos/$UPSTREAM/releases --jq '.[] | select(.draft == false) | .id')
+          RELEASES=$(gh api "repos/$UPSTREAM/releases" --jq '.[] | select(.draft == false) | .id')
+
           for RID in $RELEASES; do
-            TAG=$(gh api repos/$UPSTREAM/releases/$RID --jq '.tag_name')
-            NAME=$(gh api repos/$UPSTREAM/releases/$RID --jq '.name')
-            BODY=$(gh api repos/$UPSTREAM/releases/$RID --jq '.body')
-            PRERELEASE=$(gh api repos/$UPSTREAM/releases/$RID --jq '.prerelease')
-            EXISTS=$(gh api repos/$FORK/releases --jq ".[] | select(.tag_name == \\"$TAG\\") | .id" || true)
+            TAG=$(gh api "repos/$UPSTREAM/releases/$RID" --jq '.tag_name')
+            NAME=$(gh api "repos/$UPSTREAM/releases/$RID" --jq '.name // ""')
+            BODY=$(gh api "repos/$UPSTREAM/releases/$RID" --jq '.body // ""')
+            PRERELEASE=$(gh api "repos/$UPSTREAM/releases/$RID" --jq '.prerelease')
+
+            EXISTS=$(gh api "repos/$FORK/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .id" || true)
             if [ -n "$EXISTS" ]; then
               echo "Release $TAG already exists in fork, skipping."
               continue
             fi
+
             echo "Creating release $TAG in fork..."
-            NEW_RELEASE=$(gh api repos/$FORK/releases -f tag_name="$TAG" -f name="$NAME" -f body="$BODY" -f prerelease="$PRERELEASE" -F generate_release_notes=false)
+            NEW_RELEASE=$(gh api "repos/$FORK/releases" \
+              -f tag_name="$TAG" \
+              -f name="$NAME" \
+              -f body="$BODY" \
+              -F prerelease="$PRERELEASE" \
+              -F generate_release_notes=false)
             NEW_ID=$(echo "$NEW_RELEASE" | jq -r '.id')
+
             echo "Syncing assets for $TAG..."
-            ASSETS=$(gh api repos/$UPSTREAM/releases/$RID/assets --jq '.[] | .id')
+            ASSETS=$(gh api "repos/$UPSTREAM/releases/$RID/assets" --jq '.[] | .id')
             for AID in $ASSETS; do
-              ANAME=$(gh api repos/$UPSTREAM/releases/$RID/assets/$AID --jq '.name')
-              URL=$(gh api repos/$UPSTREAM/releases/$RID/assets/$AID --jq '.url')
+              ANAME=$(gh api "repos/$UPSTREAM/releases/$RID/assets/$AID" --jq '.name')
+              URL=$(gh api "repos/$UPSTREAM/releases/$RID/assets/$AID" --jq '.url')
               echo "  Downloading $ANAME..."
-              curl -sL -H "Authorization: token $GH_TOKEN" -H "Accept: application/octet-stream" "$URL" -o "/tmp/$ANAME"
+              curl -sL -H "Authorization: token $GH_TOKEN" \
+                   -H "Accept: application/octet-stream" \
+                   "$URL" -o "/tmp/$ANAME"
               echo "  Uploading $ANAME to fork release..."
-              gh api repos/$FORK/releases/$NEW_ID/assets -F name="$ANAME" -F data=@/tmp/$ANAME --jq '.name' || echo "  Failed to upload $ANAME"
+              gh api "repos/$FORK/releases/$NEW_ID/assets" \
+                -F name="$ANAME" \
+                -F data=@/tmp/$ANAME \
+                --jq '.name' || echo "  Failed to upload $ANAME"
               rm -f "/tmp/$ANAME"
             done
             echo "Release $TAG synced."
