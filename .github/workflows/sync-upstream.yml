@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  workflows: write
 
 jobs:
   sync:
@@ -17,6 +16,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Configure git
         run: |
@@ -25,9 +25,10 @@ jobs:
 
       - name: Merge upstream and push
         env:
-          GITHUB_TOKEN: ${ secrets.GITHUB_TOKEN }
+          PUSH_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           git remote add upstream https://github.com/525815266/YYB-Go-Enhanced.git
           git fetch upstream main
           git merge upstream/main --no-edit
-          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main
+          git remote set-url origin https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git
+          git push origin main
