@@ -315,6 +315,13 @@ func tryLonglinkCandidates(ctx context.Context, targets []Target, timeout time.D
 			return st, nil
 		}
 		failures = append(failures, fmt.Errorf("candidate %d/%d %s: %w", i+1, len(targets), net.JoinHostPort(t.IP, strconv.Itoa(t.Port)), err))
+		var rejected *ManualAuthRejectedError
+		if errors.As(err, &rejected) && rejected.Code == -10 {
+			// The endpoint accepted the handshake and rejected this ticket.
+			// Trying the same ticket on every IP cannot repair it; let the
+			// caller obtain a new login buffer within the remaining budget.
+			return WmpfSession{}, fmt.Errorf("LongLink login rejected: %w", errors.Join(failures...))
+		}
 	}
 	if len(failures) == 0 {
 		failures = append(failures, fmt.Errorf("no LongLink candidates"))
@@ -459,7 +466,7 @@ func sessionFromBlob(blob map[string]any) (WmpfSession, error) {
 		CreatedAt:        time.Now(),
 	}
 	if len(st.ShortlinkTargets) == 0 {
-		st.ShortlinkTargets = []Target{{IP: "120.241.131.173", Port: 80}}
+		st.ShortlinkTargets = append([]Target(nil), shortlinkFallbackTargets...)
 	}
 	if len(st.Session.SendKey) == 0 || len(st.Session.RecvKey) == 0 || st.Session.UIN == 0 {
 		return WmpfSession{}, fmt.Errorf("session_blob incomplete")

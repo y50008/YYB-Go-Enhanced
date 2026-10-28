@@ -18,6 +18,11 @@ const (
 	clientVersion = 524545
 	appVersion    = 1901
 
+	// clientVersionDefault mirrors clientVersion for HTTPDNS queries; kept as a
+	// separate name to document that the newdns client version must track the
+	// ilink client version used in the wpkg headers.
+	clientVersionDefault = clientVersion
+
 	transferCmd  = 0x0b41
 	jsLoginCmdID = 1029
 	phoneCmdID   = 1020
@@ -65,6 +70,16 @@ type AppSession struct {
 	Ticket    []byte
 	DeviceID  []byte
 	HostAppID []byte
+}
+
+// ManualAuthRejectedError is returned before a JSAPI operation is sent.
+// A rejected login buffer is different from an incompatible response schema.
+type ManualAuthRejectedError struct {
+	Code int64
+}
+
+func (e *ManualAuthRejectedError) Error() string {
+	return fmt.Sprintf("ManualAuth rejected: code=%d", e.Code)
 }
 
 func parseLoginBuffer(loginBufferB64 string) (loginMeta, error) {
@@ -321,6 +336,11 @@ func hybridECDHDecrypt(response []byte, temp *manualAuthTemp) ([]byte, error) {
 
 func extractSession(mar []byte) (AppSession, error) {
 	F := pbParse(mar)
+	if base, ok := F[1].([]byte); ok {
+		if code, ok := pbParse(base)[1].(int64); ok && code != 0 {
+			return AppSession{}, &ManualAuthRejectedError{Code: code}
+		}
+	}
 	f3, ok := F[3].([]byte)
 	if !ok {
 		return AppSession{}, fmt.Errorf("ManualAuthResponse missing f3")
