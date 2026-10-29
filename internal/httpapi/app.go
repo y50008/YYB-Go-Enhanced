@@ -310,6 +310,7 @@ func (a *App) Handler() http.Handler {
 	router.GET("/api/maintenance", gin.WrapF(a.handleMaintenance))
 	router.POST("/api/maintenance", gin.WrapF(a.handleMaintenance))
 	router.Any("/api/auth/profile", gin.WrapF(a.handleProfile))
+	router.Any("/api/scan-settings", gin.WrapF(a.handleScanSettings))
 	router.Any("/api/auth/password", gin.WrapF(a.handlePassword))
 	router.Any("/api/auth/sessions", gin.WrapF(a.handleSessions))
 	router.Any("/api/auth/users", gin.WrapF(a.handleUsers))
@@ -333,6 +334,7 @@ func (a *App) Handler() http.Handler {
 	router.Any("/accounts", gin.WrapF(a.handleAccountsRoot))
 	router.Any("/accounts/repair", gin.WrapF(a.handleAccountRepair))
 	router.Any("/accounts/compact", gin.WrapF(a.handleAccountCompact))
+	router.Any("/accounts/merge", gin.WrapF(a.handleAccountMerge))
 	router.Any("/accounts/avatar", gin.WrapF(a.handleAccountAvatar))
 	router.Any("/accounts/refresh", gin.WrapF(a.handleAccountRefresh))
 	router.Any("/accounts/resync", gin.WrapF(a.handleAccountResync))
@@ -443,7 +445,8 @@ func (a *App) handleQRRoot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	if _, err := normalizeLoginProduct(body.Product); err != nil {
+	product, err := a.scanProduct(r, body.Product)
+	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
@@ -459,7 +462,7 @@ func (a *App) handleQRRoot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	img, err := client.GetQRCodeImage(ctx)
+	img, err := client.GetQRCodeImageForProduct(ctx, product)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
@@ -484,6 +487,7 @@ func (a *App) handleQRRoot(w http.ResponseWriter, r *http.Request) {
 		basePath = "/wx/qrcodeauth"
 	}
 	out := map[string]any{
+		"product":    product,
 		"session_id": img.Session.ID,
 		"status":     img.Session.Status,
 		"image_url":  basePath + "/" + img.Session.ID + "/image",
@@ -1265,6 +1269,10 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 	if callErr == nil {
 		return result, nil
 	}
+	current, snapshotErr := a.db.GetAccount(ctx, acc.ID)
+	if errors.Is(callErr, store.ErrAccountAuthorizationChanged) || snapshotErr == nil && !current.SameAuthorization(acc) {
+		return nil, store.ErrAccountAuthorizationChanged
+	}
 	if errors.Is(callErr, protocol.ErrLoginCodeUnavailable) {
 		// A successful decryption without an application code does not prove
 		// the account expired. Other apps can still use this same session.
@@ -1298,7 +1306,7 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 			return nil, callErr
 		}
 	}
-	_ = a.db.InvalidateSession(ctx, acc.ID, proxyValue)
+	_ = a.db.InvalidateSessionForAccount(ctx, acc, proxyValue)
 	// Credential recovery always uses the account's refresh route, even when
 	// this protocol call explicitly selected direct egress.
 	status, _, refreshErr := a.refreshAccount(ctx, acc, true)
@@ -1349,19 +1357,22 @@ func accountNeedsRescan(acc *store.WechatAccount) bool {
 		return false
 	}
 	expiresAt := protocol.CredentialsFromMap(acc.Credentials).ExpiresAt
+	if protocol.CredentialsFromMap(acc.Credentials).Provider == "pcmgr" {
+		return false
+	}
 	return expiresAt > 0 && expiresAt <= time.Now().Unix()
 }
 
 func (a *App) invokeGetCode(ctx context.Context, acc *store.WechatAccount, appID string, _ map[string]any, proxyValue string, fallbackDirect bool) (map[string]any, error) {
-	return a.pool.GetCode(ctx, acc.LoginBuffer, appID, acc.ID, proxyValue, fallbackDirect)
+	return a.pool.GetCode(ctx, acc.LoginBuffer, appID, acc.ID, proxyValue, fallbackDirect, acc)
 }
 
 func (a *App) invokeGetPhoneNumber(ctx context.Context, acc *store.WechatAccount, appID string, _ map[string]any, proxyValue string, fallbackDirect bool) (map[string]any, error) {
-	return a.pool.GetPhoneNumber(ctx, acc.LoginBuffer, appID, acc.ID, proxyValue, fallbackDirect)
+	return a.pool.GetPhoneNumber(ctx, acc.LoginBuffer, appID, acc.ID, proxyValue, fallbackDirect, acc)
 }
 
 func (a *App) invokeOperateWXData(ctx context.Context, acc *store.WechatAccount, appID string, payload map[string]any, proxyValue string, fallbackDirect bool) (map[string]any, error) {
-	return a.pool.OperateWXData(ctx, acc.LoginBuffer, appID, payload, acc.ID, proxyValue, fallbackDirect)
+	return a.pool.OperateWXData(ctx, acc.LoginBuffer, appID, payload, acc.ID, proxyValue, fallbackDirect, acc)
 }
 
 func refreshOut(acc *store.WechatAccount, status string, refreshErr error) map[string]any {

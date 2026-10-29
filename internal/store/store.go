@@ -115,6 +115,8 @@ CREATE TABLE IF NOT EXISTS account_links (
     owner_user_id   INTEGER,
     expected_openid TEXT    NOT NULL DEFAULT '',
     token_ciphertext TEXT   NOT NULL DEFAULT '',
+    target_product TEXT    NOT NULL DEFAULT '',
+    switch_confirmed INTEGER NOT NULL DEFAULT 0,
     expires_at      INTEGER NOT NULL,
     used_at         INTEGER,
     revoked_at      INTEGER,
@@ -152,6 +154,7 @@ type WechatAccount struct {
 }
 
 type AccountPublic struct {
+	ScanProduct            string  `json:"scan_product"`
 	ID                     int64   `json:"id"`
 	OpenID                 string  `json:"openid"`
 	UIN                    *int64  `json:"uin"`
@@ -242,6 +245,8 @@ func migrateAccountLinks(ctx context.Context, db *sql.DB) error {
 	for _, column := range []struct{ name, definition string }{
 		{"token_ciphertext", "TEXT NOT NULL DEFAULT ''"},
 		{"revoked_at", "INTEGER"},
+		{"target_product", "TEXT NOT NULL DEFAULT ''"},
+		{"switch_confirmed", "INTEGER NOT NULL DEFAULT 0"},
 	} {
 		exists, err := sqliteColumnExists(ctx, db, "account_links", column.name)
 		if err != nil {
@@ -668,6 +673,9 @@ func (db *DB) CompactAccountIDs(ctx context.Context) (map[int64]int64, error) {
 				return nil, err
 			}
 		}
+		if _, err = tx.ExecContext(ctx, "UPDATE app_settings SET key=? WHERE key=?", accountReferenceKey(-oldID), accountReferenceKey(oldID)); err != nil {
+			return nil, err
+		}
 	}
 	for oldID, newID := range mapping {
 		if _, err = tx.ExecContext(ctx, "UPDATE wechat_accounts SET id=? WHERE id=?", newID, -oldID); err != nil {
@@ -677,6 +685,9 @@ func (db *DB) CompactAccountIDs(ctx context.Context) (map[int64]int64, error) {
 			if _, err = tx.ExecContext(ctx, "UPDATE "+child.table+" SET "+child.column+"=? WHERE "+child.column+"=?", newID, -oldID); err != nil {
 				return nil, err
 			}
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE app_settings SET key=? WHERE key=?", accountReferenceKey(newID), accountReferenceKey(-oldID)); err != nil {
+			return nil, err
 		}
 	}
 	// Keep SQLite's AUTOINCREMENT metadata aligned for any external inserts.
@@ -805,14 +816,34 @@ func (db *DB) SetAccountStatus(ctx context.Context, id int64, status string) err
 }
 
 func (db *DB) DeleteAccount(ctx context.Context, id int64) error {
-	_, err := db.sql.ExecContext(ctx, "DELETE FROM wechat_accounts WHERE id=?", id)
-	return err
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, "DELETE FROM wechat_accounts WHERE id=?", id); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM app_settings WHERE key=?", accountReferenceKey(id)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (db *DB) GetSession(ctx context.Context, accountID int64, tcpProxy string) (*SessionRow, error) {
 	row := db.sql.QueryRowContext(ctx,
 		"SELECT id, wechat_account_id, uin, tcp_proxy, session_blob, expires_at, created_at, updated_at FROM sessions WHERE wechat_account_id=? AND tcp_proxy=? AND expires_at>?",
 		accountID, tcpProxy, time.Now().Unix(),
+	)
+	return scanSession(row)
+}
+
+// GetSessionForRecovery also reads a legacy local-cache deadline. The caller
+// must validate the issued PSK deadline before attempting to reuse the state.
+func (db *DB) GetSessionForRecovery(ctx context.Context, accountID int64, tcpProxy string) (*SessionRow, error) {
+	row := db.sql.QueryRowContext(ctx,
+		"SELECT id, wechat_account_id, uin, tcp_proxy, session_blob, expires_at, created_at, updated_at FROM sessions WHERE wechat_account_id=? AND tcp_proxy=?",
+		accountID, tcpProxy,
 	)
 	return scanSession(row)
 }
@@ -911,6 +942,10 @@ func (db *DB) GetFeatureByName(ctx context.Context, name string) (*Feature, erro
 }
 
 func (a *WechatAccount) Public() AccountPublic {
+	product := "appstore"
+	if strings.HasPrefix(a.OpenID, "pcmgr:") {
+		product = "pcmgr"
+	}
 	var refreshTokenObservedAt *int64
 	rescanRecommended := false
 	var credentialExpiresAt *int64
@@ -937,11 +972,12 @@ func (a *WechatAccount) Public() AccountPublic {
 		// A transient refresh failure is kept as unknown for retry purposes, but
 		// once the cached credential is past its expiry the UI should still guide
 		// the operator to rescan instead of leaving the account looking healthy.
-		if !rescanRecommended && (a.Status == nil || strings.EqualFold(strings.TrimSpace(*a.Status), "unknown")) && expiresAt <= time.Now().Unix() {
+		if product != "pcmgr" && !rescanRecommended && (a.Status == nil || strings.EqualFold(strings.TrimSpace(*a.Status), "unknown")) && expiresAt <= time.Now().Unix() {
 			rescanRecommended = true
 		}
 	}
 	return AccountPublic{
+		ScanProduct:            product,
 		ID:                     a.ID,
 		OpenID:                 a.OpenID,
 		UIN:                    a.UIN,
