@@ -662,11 +662,22 @@
     }
 
     .selected-account strong {
+      flex: 1;
+      min-width: 0;
       color: var(--ink);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+
+    .test-provider { flex-shrink: 0; font-size: 12px; font-weight: 700; color: var(--ink); }
+    .test-command { min-width: 0; border-top: 1px solid var(--line); padding-top: 12px; }
+    .test-command summary { cursor: pointer; font-size: 13px; font-weight: 650; }
+    .command-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 8px; }
+    .command-toolbar label { font-size: 12px; color: var(--muted); }
+    .command-toolbar .select { width: auto; flex: 1; min-width: 100px; }
+    .command-preview { max-height: 260px; overflow: auto; margin: 0; padding: 12px; border-radius: var(--radius); background: var(--code-bg); color: var(--code-ink); font: 12px/1.6 ui-monospace, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .test-command .field-note { display: block; margin-top: 8px; line-height: 1.6; }
 
     .account-tools {
       display: flex;
@@ -1029,6 +1040,7 @@
             <div class="selected-account">
               <span>当前账号</span>
               <strong id="selectedAccountName">未选择</strong>
+              <span class="test-provider" id="testProvider" aria-live="polite">未选择渠道</span>
             </div>
             <div class="account-tools">
               <input class="input" id="accountRemarkInput" maxlength="80" placeholder="账号备注，例如：Boom">
@@ -1055,7 +1067,8 @@
               </div>
               <div class="field">
                 <label for="featureSel">能力</label>
-                <select class="select" id="featureSel"></select>
+                <select class="select" id="featureSel" aria-describedby="featureHint"></select>
+                <span class="field-note" id="featureHint" aria-live="polite"></span>
               </div>
               <div class="field">
                 <label for="appidInput" id="appidLabel">APPID</label>
@@ -1078,13 +1091,23 @@
               </div>
               <div class="field hidden" id="payloadGroup">
                 <label for="payloadInput">请求 JSON</label>
-                <textarea class="textarea" id="payloadInput" spellcheck="false">{"api_name":"getUserInfo","data":{},"env":1}</textarea>
+                <textarea class="textarea" id="payloadInput" spellcheck="false" placeholder="粘贴目标小程序的完整 operateWxData JSON"></textarea>
               </div>
             </div>
             <div class="inline-actions">
               <button class="btn primary" id="callBtn" type="button">执行调用</button>
               <button class="btn secondary" id="clearResultBtn" type="button">清空结果</button>
             </div>
+            <details class="test-command" id="testCommand">
+              <summary>测试命令</summary>
+              <div class="command-toolbar">
+                <label for="commandShell">格式</label>
+                <select class="select" id="commandShell"><option value="bash">cURL · Bash</option><option value="powershell">PowerShell</option></select>
+                <button class="btn secondary" id="copyCommandBtn" type="button">复制命令</button>
+              </div>
+              <pre class="command-preview" id="commandPreview" tabindex="0"></pre>
+              <span class="field-note">命令跟随当前账号、能力和参数。已配置协议令牌时，请先设置环境变量 YYB_PROTOCOL_TOKEN；此处不会写入页面中填写的令牌。</span>
+            </details>
           </div>
         </section>
 
@@ -1225,16 +1248,16 @@
       accounts: [],
       features: [
         { name: "getCode", label: "/wx/code 获取小程序 code", route: "/wx/code", requiresAppID: true },
-        { name: "getUserInfo", label: "/wx/getuserinfo 用户信息", route: "/wx/getuserinfo", requiresAppID: false },
+        { name: "getUserInfo", label: "/wx/getuserinfo 渠道账号资料", route: "/wx/getuserinfo", requiresAppID: false },
         { name: "encryptKey", label: "/wx/encryptkey 加密能力转发", route: "/wx/encryptkey", requiresAppID: true, needsPayload: true },
         { name: "latestUserKey", label: "/wx/getlatestuserkey 用户最新加密密钥", route: "/wx/getlatestuserkey", requiresAppID: true, needsPayload: true },
         { name: "getPhoneNumber", label: "/wx/getphonenumber 手机号", route: "/wx/getphonenumber", requiresAppID: true },
-        { name: "cloud", label: "/wx/cloud 云函数", route: "/wx/cloud", requiresAppID: true, needsPayload: true },
+        { name: "cloud", label: "/wx/cloud 通用数据转发", route: "/wx/cloud", requiresAppID: true, needsPayload: true },
         { name: "qrcodeauth", label: "/wx/qrcodeauth 二维码授权", route: "/wx/qrcodeauth", requiresAppID: false, requiresAccount: false },
-        { name: "mpGetA8Key", label: "/wx/mpgeta8key 文章会话", route: "/wx/mpgeta8key", requiresAppID: true, needsPayload: true },
-        { name: "appmsgext", label: "/wx/appmsgext 文章阅读数", route: "/wx/appmsgext", requiresAppID: true, needsPayload: true },
-        { name: "appmsglike", label: "/wx/appmsglike 文章点赞", route: "/wx/appmsglike", requiresAppID: true, needsPayload: true },
-        { name: "oauth", label: "/wx/oauth 公众号授权", route: "/wx/oauth", requiresAppID: true }
+        { name: "mpGetA8Key", label: "/wx/mpgeta8key 文章会话转发（未验证）", route: "/wx/mpgeta8key", requiresAppID: true, needsPayload: true },
+        { name: "appmsgext", label: "/wx/appmsgext 文章数据转发（未验证）", route: "/wx/appmsgext", requiresAppID: true, needsPayload: true },
+        { name: "appmsglike", label: "/wx/appmsglike 文章点赞转发（未验证）", route: "/wx/appmsglike", requiresAppID: true, needsPayload: true },
+        { name: "oauth", label: "/wx/oauth 公众号授权链接（仅生成）", route: "/wx/oauth", requiresAppID: true }
       ],
       proxyConfigs: new Map(),
       selectedOpenID: "",
@@ -1363,6 +1386,7 @@
     function statusText(status) {
       if (status === "alive") return "可用";
       if (status === "expired") return "需重扫";
+      if (status === "session_only") return "需补授权";
       return "待确认";
     }
 
@@ -1408,6 +1432,7 @@
 
     function lifecycleMarkup(account) {
       if (account.status === "expired") return '<span class="account-lifecycle lifecycle-inactive">保活已停止 · 重新扫码后恢复</span>';
+      if (account.status === "session_only") return '<span class="account-lifecycle lifecycle-inactive">授权已失效 · 仅尝试原会话，请重新扫码</span>';
       const now = Math.floor(Date.now() / 1000);
       if(account.scan_product==='pcmgr'){
 		const due=Number(account.credential_expires_at||0),remaining=Math.max(0,due-now),interval=Number(account.credential_expires_in||86400),ratio=Math.min(1,remaining/interval);
@@ -1470,6 +1495,7 @@
         card.querySelector(".account-select").setAttribute("aria-pressed", String(selected));
       });
       placeMobileAccountActions();
+      updateFeatureHint();
     }
 
     function placeMobileAccountActions() {
@@ -1527,8 +1553,8 @@
 		const proxy = proxyText(state.proxyConfigs.get(String(account.id)));
         const isExpired = account.status === "expired";
         const cls = isExpired ? "expired" : account.rescan_recommended ? "warning" : statusClass(account.status);
-        const status = isExpired ? "已失效" : account.rescan_recommended ? "建议重扫" : statusText(account.status);
-        const pendingConfirmation = account.status !== "alive" && account.status !== "expired";
+        const status = isExpired ? "已失效" : account.status === "session_only" ? "需补授权" : account.rescan_recommended ? "建议重扫" : statusText(account.status);
+        const pendingConfirmation = account.status !== "alive" && account.status !== "expired" && account.status !== "session_only";
         const button = document.createElement("article");
         button.className = `account-card ${cls}${isExpired && playExpiredIntro ? " expired-alert" : ""}`;
         button.dataset.openid = account.openid;
@@ -1545,7 +1571,7 @@
               <span class="account-header-tools">
               ${pendingConfirmation
                 ? `<button type="button" class="account-status account-status-toggle ${cls}" aria-expanded="false" aria-controls="confirm-account-${account.id}" aria-label="确认账号 ${escapeHTML(number)} 的状态"><span class="status-dot"></span>${status}<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button>`
-                : `<span class="account-status ${cls}" title="${account.rescan_recommended ? "RefreshToken 已使用约 25 天，建议在失效前重新扫码" : ""}"><span class="status-dot"></span>${status}</span>`}
+                : `<span class="account-status ${cls}" title="${account.status === "session_only" ? "授权已拒绝，原会话可尝试使用，不代表保活恢复" : account.rescan_recommended ? "RefreshToken 已使用约 25 天，建议在失效前重新扫码" : ""}"><span class="status-dot"></span>${status}</span>`}
               <span class="scan-channel-badge" title="扫码渠道：${account.scan_product === 'pcmgr' ? 'PCMgr' : 'YYB'}" aria-label="${account.scan_product === 'pcmgr' ? 'PCMgr' : 'YYB'} 渠道"><img alt="" src="/static/images/scan-${account.scan_product === 'pcmgr' ? 'pcmgr' : 'yyb'}.png"></span>
               </span>
             </span>
@@ -1634,10 +1660,14 @@
         togglePayload();
         return;
       }
-      select.innerHTML = state.features.map(feature => {
-        const label = feature.label || feature.name;
-        return `<option value="${escapeHTML(feature.name)}" data-name="${escapeHTML(feature.name)}">${escapeHTML(label)}</option>`;
-      }).join("");
+      const groups = [
+        ["小程序", ["getCode", "encryptKey", "latestUserKey", "getPhoneNumber", "cloud"]],
+        ["渠道账号", ["getUserInfo", "qrcodeauth"]],
+        ["未验证的兼容转发", ["mpGetA8Key", "appmsgext", "appmsglike"]],
+        ["公众号授权链接", ["oauth"]]
+      ];
+      select.innerHTML = groups.map(([label, names]) => `<optgroup label="${label}">${state.features.filter(feature => names.includes(feature.name)).map(feature =>
+        `<option value="${escapeHTML(feature.name)}" data-name="${escapeHTML(feature.name)}">${escapeHTML(feature.label || feature.name)}</option>`).join("")}</optgroup>`).join("");
       togglePayload();
       renderStats();
     }
@@ -1663,6 +1693,91 @@
       $("oauthStateGroup").classList.toggle("hidden", !isOAuth);
       $("appidLabel").textContent = isOAuth ? "公众号 AppID" : "APPID";
       $("appidInput").placeholder = isOAuth ? "wx...（18 位公众号 AppID）" : "小程序 AppID";
+      updateFeatureHint();
+    }
+
+    function updateFeatureHint() {
+      const feature = currentFeatureName();
+      const account = getSelectedAccount();
+      const product = account?.scan_product === "pcmgr" ? "PCMgr" : "YYB";
+      $("testProvider").textContent = account ? product : "系统默认渠道";
+      for (const option of $("featureSel").options) {
+        const item = state.features.find(item => item.name === option.dataset.name);
+        if (!item) continue;
+        option.textContent = item.name === "getPhoneNumber" ? `${item.route} ${product} 手机号 · ${product === "PCMgr" ? "1141" : "1020"}`
+          : item.name === "getUserInfo" ? `${item.route} ${product === "PCMgr" ? "PCMgr 扫码资料" : "YYB 渠道资料"}` : item.label;
+      }
+      const hints = {
+        getCode: "小程序取码，不能替代原生 APP 或公众号授权。",
+        getUserInfo: product === "PCMgr" ? "读取扫码时保存的渠道资料，不检测小程序登录态。" : "读取渠道账号资料，不是目标小程序的加密资料。",
+        encryptKey: "通过 1133 转发，需要完整 JSON；以返回的 err_no 判断结果。",
+        latestUserKey: "通过 1133 转发 webapi_getuserencryptkey，以返回的 err_no 判断结果。",
+        getPhoneNumber: product === "PCMgr" ? "原生 1141 路径，已通过单个目标实测；仍需目标小程序支持及真实授权。" : "原有 1020 兼容路径，需要目标小程序支持及真实授权。",
+        cloud: "通用 operateWxData 转发，需要真实业务参数，不自动生成云函数请求。",
+        qrcodeauth: "新建当前渠道二维码；生成成功不代表已扫码登录。",
+        mpGetA8Key: "仅兼容转发，尚未实现独立公众号 A8Key 链路。",
+        appmsgext: "仅兼容转发，尚未验证文章接口可用。",
+        appmsglike: "仅兼容转发，尚未验证文章接口可用；提交可能产生点赞操作。",
+        oauth: "仅生成授权链接，需要在微信完成授权，不会直接返回 code。"
+      };
+      $("featureHint").textContent = `${product} · ${hints[feature] || "选择要测试的接口。"}`;
+      updateTestCommand();
+    }
+
+    function featureRequest() {
+      const feature = currentFeature(), account = getSelectedAccount();
+      if (!account && feature?.requiresAccount !== false) throw new Error("请先选择一个账号。");
+      const endpoint = currentFeatureName(), appID = $("appidInput").value.trim();
+      if (!endpoint) throw new Error("当前没有可调用能力。");
+      if (feature?.requiresAppID !== false && !appID) throw new Error("请输入 APPID。");
+      const isOAuth = endpoint === "oauth", isQRCodeAuth = endpoint === "qrcodeauth";
+      const body = isQRCodeAuth ? (account ? {product: account.scan_product || "appstore"} : undefined)
+        : isOAuth ? {ref: String(account.id), appid: appID, redirect_uri: $("oauthRedirectInput").value.trim(), scope: $("oauthScopeInput").value, state: $("oauthStateInput").value.trim()}
+        : {ref: account.openid};
+      if (!isOAuth && feature?.requiresAppID !== false) body.app_id = appID;
+      if (isOAuth && !body.redirect_uri) throw new Error("请填写公众号回调地址。");
+      if (feature?.needsPayload) {
+        const raw = $("payloadInput").value.trim();
+        if (!raw) throw new Error("operateWxData 需要请求 JSON。");
+        try { body.payload = JSON.parse(raw); } catch { throw new Error("请求 JSON 格式不正确。"); }
+        if (!body.payload || typeof body.payload !== "object" || Array.isArray(body.payload)) throw new Error("请求 JSON 必须是对象。");
+      }
+      return {feature, account, endpoint, isOAuth, body, route: feature.route};
+    }
+
+    function updateTestCommand() {
+      const output = $("commandPreview"), button = $("copyCommandBtn");
+      try {
+        const {route, body} = featureRequest();
+        const url = location.origin + route, payload = body === undefined ? "" : JSON.stringify(body);
+        if ($("commandShell").value === "powershell") {
+          const quote = value => "'" + value.replaceAll("'", "''") + "'";
+          output.textContent = `Invoke-RestMethod -Method Post -Uri ${quote(url)} -ContentType 'application/json' -Headers @{ Authorization = "Bearer $env:YYB_PROTOCOL_TOKEN" }${payload ? ` -Body ${quote(payload)}` : ""}`;
+        } else {
+          const quote = value => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+          output.textContent = `curl --request POST ${quote(url)} \\\n  --header 'Content-Type: application/json' \\\n  --header "Authorization: Bearer \${YYB_PROTOCOL_TOKEN}"${payload ? ` \\\n  --data-raw ${quote(payload)}` : ""}`;
+        }
+        button.disabled = false;
+      } catch (error) {
+        output.textContent = error.message;
+        button.disabled = true;
+      }
+    }
+
+    function protocolResultFailure(result) {
+      let value = result?.result || result;
+      for (let depth = 0; depth < 4 && value; depth++) {
+        if (typeof value === "string") {
+          try { value = JSON.parse(value); } catch { break; }
+        }
+        if (!value || typeof value !== "object") break;
+        for (const key of ["err_no", "errcode", "ret"]) {
+          if (typeof value[key] === "number" && value[key] !== 0) return `${key}=${value[key]}`;
+        }
+        if (typeof value.base_resp?.ret === "number" && value.base_resp.ret !== 0) return `ret=${value.base_resp.ret}`;
+        value = value.data;
+      }
+      return "";
     }
 
     async function loadHealth() {
@@ -2129,55 +2244,10 @@
     }
 
     async function callFeature() {
-      const feature = currentFeature();
-      const account = getSelectedAccount();
-      if (!account && feature?.requiresAccount !== false) {
-        setResult("请先选择一个账号。", "缺少账号", true);
-        return;
-      }
-
-      const endpoint = currentFeatureName();
-      const appID = $("appidInput").value.trim();
-      if (!endpoint) {
-        setResult("当前没有可调用能力。", "缺少能力", true);
-        return;
-      }
-      if (feature?.requiresAppID !== false && !appID) {
-        setResult("请输入 APPID。", "缺少 APPID", true);
-        return;
-      }
-
-      const isOAuth = endpoint.toLowerCase() === "oauth";
-      const isQRCodeAuth = feature?.name === "qrcodeauth";
-      const body = isQRCodeAuth
-        ? undefined
-        : isOAuth
-        ? {
-            ref: String(account.id),
-            appid: appID,
-            redirect_uri: $("oauthRedirectInput").value.trim(),
-            scope: $("oauthScopeInput").value,
-            state: $("oauthStateInput").value.trim()
-          }
-        : { ref: account.openid };
-      if (!isOAuth && feature?.requiresAppID !== false) body.app_id = appID;
-      if (isOAuth && !body.redirect_uri) {
-        setResult("请填写公众号回调地址。", "缺少回调地址", true);
-        return;
-      }
-      if (feature?.needsPayload) {
-        const raw = $("payloadInput").value.trim();
-        if (!raw) {
-          setResult("operateWxData 需要请求 JSON。", "缺少 payload", true);
-          return;
-        }
-        try {
-          body.payload = JSON.parse(raw);
-        } catch {
-          setResult("请求 JSON 格式不正确。", "JSON 解析失败", true);
-          return;
-        }
-      }
+      let request;
+      try { request = featureRequest(); }
+      catch (error) { setResult(error.message, "请补全请求", true); return; }
+      const {feature, account, endpoint, isOAuth, body, route} = request;
 
       const button = $("callBtn");
       button.disabled = true;
@@ -2188,10 +2258,16 @@
       try {
         const token = $("protocolTokenInput").value.trim().replace(/^Bearer\s+/i, "").trim();
         const headers = token ? { Authorization: `Bearer ${token}` } : {};
-        const result = await api("POST", feature?.route || (isOAuth ? "/wx/oauth" : `/wxapp/${endpoint}`), body, headers);
+        const result = await api("POST", route, body, headers);
         $("protocolTokenInput").removeAttribute("aria-invalid");
         const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
-        setResult(result, `调用完成，用时 ${seconds}s`, false);
+        const failure = protocolResultFailure(result);
+        const outcome = failure ? `上游拒绝：${failure}`
+          : isOAuth ? "已生成链接，待微信授权"
+          : endpoint === "getUserInfo" ? "已读取渠道资料"
+          : feature?.needsPayload || endpoint === "getPhoneNumber" ? "转发完成，请检查内层业务结果"
+          : "调用完成";
+        setResult(result, `${outcome} · ${seconds}s`, Boolean(failure));
         await loadAccounts({background:true});
       } catch (error) {
         if (error.status === 401) {
@@ -2199,7 +2275,10 @@
           $("protocolTokenInput").focus();
           setResult("协议令牌缺失或错误，请填写 YYB_PROTOCOL_TOKEN 后重试。", "调用失败 401", true);
         } else {
-          setResult(error.data || error.message, `调用失败 ${error.status || ""}`.trim(), true);
+          const ticketRefused = /PCMgr GetLoginBuffer rejected: code=1\b/.test(error.message);
+          const requestRefused = error.data?.request_rejected === true;
+          const detail = ticketRefused ? `PCMgr 取票据失败（20138/1），本次接口未执行。请核对该渠道的小程序授权。\n\n${error.message}` : error.payload || error.message;
+          setResult(detail, ticketRefused ? "渠道取票据失败" : requestRefused ? "应用请求被拒绝，账号授权已保留" : `调用失败 ${error.status || ""}`.trim(), true);
         }
       } finally {
         button.disabled = false;
@@ -2250,7 +2329,21 @@
     $("deleteAccountBtn").addEventListener("click", deleteAccount);
     $("saveQingLongBtn").addEventListener("click", saveQingLongConfig);
     $("clearQingLongBtn").addEventListener("click", clearQingLongConfig);
-    $("featureSel").addEventListener("change", togglePayload);
+    $("featureSel").addEventListener("change", () => {
+      togglePayload();
+      const input = $("payloadInput");
+      const example = '{"api_name":"webapi_getuserencryptkey","data":{},"env":1}';
+      if (["encryptKey", "latestUserKey"].includes(currentFeatureName()) && !input.value.trim()) input.value = example;
+      else if (!["encryptKey", "latestUserKey"].includes(currentFeatureName()) && input.value === example) input.value = "";
+      updateTestCommand();
+    });
+    for (const id of ["appidInput", "payloadInput", "oauthRedirectInput", "oauthStateInput"]) $(id).addEventListener("input", updateTestCommand);
+    $("oauthScopeInput").addEventListener("change", updateTestCommand);
+    $("commandShell").addEventListener("change", updateTestCommand);
+    $("copyCommandBtn").addEventListener("click", async () => {
+      try { await copyText($("commandPreview").textContent); setActivity("测试命令已复制，请先设置 YYB_PROTOCOL_TOKEN 环境变量"); }
+      catch { setActivity("复制失败，请选中测试命令后复制"); }
+    });
     $("protocolTokenInput").addEventListener("input", () => $("protocolTokenInput").removeAttribute("aria-invalid"));
     $("clearProtocolTokenBtn").addEventListener("click", () => {
       $("protocolTokenInput").value = "";
