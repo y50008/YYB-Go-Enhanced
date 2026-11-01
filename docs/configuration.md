@@ -224,6 +224,20 @@ YYB_NOTIFY_ACCOUNT_PUSH=true
 
 推送内容只含账号编号、备注 / 昵称、渠道、状态、时间和数字诊断码，不含 OpenID、凭据或 token。发送是异步的，不阻塞续期和协议请求；结果记录在“运行日志”的 `account.notified` / `account.notify_failed`。
 
+## 取码熔断（v0.2.59 起）
+
+```dotenv
+YYB_CIRCUIT_BREAKER=on
+```
+
+默认 `on`。熔断只控制流量，从不修改账号状态、清空凭据或触发续期；被熔断的请求立即返回 HTTP `429`（带 `Retry-After` 和 `data.circuit_open`），不再发往上游，与上游 `502`、重扫 `409` 区分，脚本应据此退避。
+
+- **目标层：** 同一账号 + AppID + 请求类型（取码 / 取号 / operateWxData）在 30 分钟内连续 2 次被应用层 `-14` 拒绝，或连续 3 次返回空 code，暂停该目标 10 分钟。取号 / operateWxData 被拒不会拦住同 AppID 的取码（v0.2.60 起）。
+- **会话层：** 同一账号 5 分钟内有 3 个不同 AppID 的取码被 `-14` 拒绝，暂停该账号全部业务请求 15 分钟。
+- 一次成功清空该账号的会话层和对应目标；重新扫码、手动置失效也会清空。
+- 记录：运行日志 `protocol.circuit_open` / `protocol.circuit_deferred`，v0.2.60 起事件带 `app_id` 与请求类型。
+- 设为 `off` 恢复旧行为；阈值为编译期默认值。详见[取码熔断与触发规律](code-circuit-breaker-20261101.md)。
+
 ## 数据目录与备份
 
 Compose 默认持久化：

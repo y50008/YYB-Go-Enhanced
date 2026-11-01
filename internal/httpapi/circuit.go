@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"yyb_go/internal/eventlog"
 )
 
 // writeIfCircuitOpen renders a held-off request as HTTP 429 with the retry
@@ -59,6 +61,7 @@ type circuitConfig struct {
 	TargetAppRejects       int           // consecutive -14 before a target opens
 	TargetEmptyCodes       int           // consecutive empty codes before a target opens
 	TargetCooldown         time.Duration // how long a target stays held off
+	TargetWindow           time.Duration // rejections count as consecutive only within this gap
 	SessionDistinctTargets int           // distinct -14 AppIDs that open the session
 	SessionWindow          time.Duration // window those distinct AppIDs are counted in
 	SessionCooldown        time.Duration // how long the session stays held off
@@ -78,6 +81,7 @@ func defaultCircuitConfig() circuitConfig {
 		TargetAppRejects:       2,
 		TargetEmptyCodes:       3,
 		TargetCooldown:         10 * time.Minute,
+		TargetWindow:           30 * time.Minute,
 		SessionDistinctTargets: 3,
 		SessionWindow:          5 * time.Minute,
 		SessionCooldown:        15 * time.Minute,
@@ -103,8 +107,22 @@ func (e *circuitOpenError) Error() string {
 type targetBreaker struct {
 	appRejects int
 	emptyCodes int
+	last       time.Time
 	openUntil  time.Time
 }
+
+// targetKey is one (account, AppID, request class) the breaker tracks. A phone
+// or operateWxData request that the host refuses for its own reasons must not
+// hold off wx.login for the same AppID, so the class is part of the key.
+type targetKey struct {
+	account int64
+	appID   string
+	op      string
+}
+
+// maxBreakerTargets bounds memory: AppIDs come from callers, so a script that
+// walks arbitrary AppIDs must not grow the map without limit.
+const maxBreakerTargets = 4096
 
 type sessionBreaker struct {
 	recent    map[string]time.Time // AppID -> last -14 within the window
@@ -116,7 +134,7 @@ type circuitBreaker struct {
 	now func() time.Time
 
 	mu       sync.Mutex
-	targets  map[string]*targetBreaker
+	targets  map[targetKey]*targetBreaker
 	sessions map[int64]*sessionBreaker
 }
 
@@ -124,19 +142,15 @@ func newCircuitBreaker(cfg circuitConfig) *circuitBreaker {
 	return &circuitBreaker{
 		cfg:      cfg,
 		now:      time.Now,
-		targets:  map[string]*targetBreaker{},
+		targets:  map[targetKey]*targetBreaker{},
 		sessions: map[int64]*sessionBreaker{},
 	}
-}
-
-func targetKey(accountID int64, appID string) string {
-	return strconv.FormatInt(accountID, 10) + "\x00" + appID
 }
 
 // check reports whether a request for this target may reach the upstream. The
 // session layer is checked first: a wholesale-rejected account holds off every
 // target. A disabled breaker always allows.
-func (c *circuitBreaker) check(accountID int64, appID string) error {
+func (c *circuitBreaker) check(accountID int64, appID, op string) error {
 	if c == nil || !c.cfg.Enabled {
 		return nil
 	}
@@ -146,7 +160,7 @@ func (c *circuitBreaker) check(accountID int64, appID string) error {
 	if s := c.sessions[accountID]; s != nil && now.Before(s.openUntil) {
 		return &circuitOpenError{Scope: "session", RetryAfter: s.openUntil.Sub(now)}
 	}
-	if t := c.targets[targetKey(accountID, appID)]; t != nil && now.Before(t.openUntil) {
+	if t := c.targets[targetKey{accountID, appID, op}]; t != nil && now.Before(t.openUntil) {
 		return &circuitOpenError{Scope: "target", RetryAfter: t.openUntil.Sub(now)}
 	}
 	return nil
@@ -155,14 +169,14 @@ func (c *circuitBreaker) check(accountID int64, appID string) error {
 // record folds one call outcome into both layers and reports whether it opened
 // a breaker (for logging). A success clears the account's session and this
 // target; unrelated failures (circuitOther) are ignored.
-func (c *circuitBreaker) record(accountID int64, appID string, outcome circuitOutcome) (openedScope string) {
+func (c *circuitBreaker) record(accountID int64, appID, op string, outcome circuitOutcome) (openedScope string) {
 	if c == nil || !c.cfg.Enabled {
 		return ""
 	}
 	now := c.now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	key := targetKey(accountID, appID)
+	key := targetKey{accountID, appID, op}
 
 	if outcome == circuitOK {
 		delete(c.targets, key)
@@ -173,27 +187,30 @@ func (c *circuitBreaker) record(accountID int64, appID string, outcome circuitOu
 		return ""
 	}
 
-	t := c.targets[key]
-	if t == nil {
-		t = &targetBreaker{}
-		c.targets[key] = t
-	}
-	switch outcome {
-	case circuitAppReject:
-		t.appRejects++
-	case circuitEmptyCode:
-		t.emptyCodes++
-	}
-	if !now.Before(t.openUntil) &&
-		(t.appRejects >= c.cfg.TargetAppRejects || t.emptyCodes >= c.cfg.TargetEmptyCodes) {
-		t.openUntil = now.Add(c.cfg.TargetCooldown)
-		t.appRejects, t.emptyCodes = 0, 0
-		openedScope = "target"
+	if t := c.targetLocked(key, now); t != nil {
+		if !t.last.IsZero() && !now.Before(t.openUntil) && now.Sub(t.last) > c.cfg.TargetWindow {
+			t.appRejects, t.emptyCodes = 0, 0
+		}
+		t.last = now
+		switch outcome {
+		case circuitAppReject:
+			t.appRejects++
+		case circuitEmptyCode:
+			t.emptyCodes++
+		}
+		if !now.Before(t.openUntil) &&
+			(t.appRejects >= c.cfg.TargetAppRejects || t.emptyCodes >= c.cfg.TargetEmptyCodes) {
+			t.openUntil = now.Add(c.cfg.TargetCooldown)
+			t.appRejects, t.emptyCodes = 0, 0
+			openedScope = "target"
+		}
 	}
 
-	// Only an application-layer -14 counts toward a wholesale session lockout.
-	// An empty code means "check this AppID", not that the whole session died.
-	if outcome == circuitAppReject {
+	// Only an application-layer -14 on a code request counts toward a wholesale
+	// session lockout. An empty code means "check this AppID", not that the
+	// whole session died, and phone or operate requests are refused for
+	// ordinary reasons too, so they only feed their own target.
+	if outcome == circuitAppReject && countsTowardSession(op) {
 		s := c.sessions[accountID]
 		if s == nil {
 			s = &sessionBreaker{recent: map[string]time.Time{}}
@@ -215,6 +232,33 @@ func (c *circuitBreaker) record(accountID int64, appID string, outcome circuitOu
 	return openedScope
 }
 
+// targetLocked returns the tracker for key, creating it unless the map is full
+// of recently active targets. The caller holds c.mu.
+func (c *circuitBreaker) targetLocked(key targetKey, now time.Time) *targetBreaker {
+	if t := c.targets[key]; t != nil {
+		return t
+	}
+	if len(c.targets) >= maxBreakerTargets {
+		for k, t := range c.targets {
+			if !now.Before(t.openUntil) && now.Sub(t.last) >= time.Hour {
+				delete(c.targets, k)
+			}
+		}
+		if len(c.targets) >= maxBreakerTargets {
+			return nil
+		}
+	}
+	t := &targetBreaker{}
+	c.targets[key] = t
+	return t
+}
+
+// countsTowardSession reports whether a -14 on this request class is evidence
+// that the whole protocol session is refused. An unspecified class counts.
+func countsTowardSession(op string) bool {
+	return op == "" || op == eventlog.OpGetCode
+}
+
 // forget drops all breaker state for an account, used after a re-scan so a new
 // authorization starts clean.
 func (c *circuitBreaker) forget(accountID int64) {
@@ -224,9 +268,8 @@ func (c *circuitBreaker) forget(accountID int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.sessions, accountID)
-	prefix := strconv.FormatInt(accountID, 10) + "\x00"
 	for key := range c.targets {
-		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+		if key.account == accountID {
 			delete(c.targets, key)
 		}
 	}

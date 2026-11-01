@@ -29,6 +29,56 @@ type codeRepairAttempt struct {
 	At      time.Time
 }
 
+// freshSessionWindow is how long after a successful request on a session a -14
+// is treated as the AppID's own refusal. Sessions do not expire within seconds,
+// so a new login inside this window cannot help and only adds logins that the
+// upstream may count against the authorization.
+const freshSessionWindow = 2 * time.Minute
+
+// verifiedSession records the last request that succeeded on an account's
+// session for one route.
+type verifiedSession struct {
+	Account *store.WechatAccount
+	At      time.Time
+}
+
+func sessionKey(accountID int64, proxy string) string {
+	return fmt.Sprintf("%d|%s", accountID, proxy)
+}
+
+func firstAccount(expected []*store.WechatAccount) *store.WechatAccount {
+	if len(expected) == 0 {
+		return nil
+	}
+	return expected[0]
+}
+
+// markSessionVerified is called after a request succeeded. acc may be nil when
+// the caller did not pass the authorization snapshot.
+func (p *Pool) markSessionVerified(acc *store.WechatAccount, accountID int64, proxy string) {
+	now := time.Now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for k, v := range p.verified {
+		if now.Sub(v.At) >= freshSessionWindow {
+			delete(p.verified, k)
+		}
+	}
+	p.verified[sessionKey(accountID, proxy)] = verifiedSession{Account: acc, At: now}
+}
+
+// sessionRecentlyVerified reports whether a request succeeded on this account's
+// session for this route within freshSessionWindow under the same authorization.
+func (p *Pool) sessionRecentlyVerified(current *store.WechatAccount, proxy string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	v, ok := p.verified[sessionKey(current.ID, proxy)]
+	if !ok || time.Since(v.At) >= freshSessionWindow {
+		return false
+	}
+	return v.Account == nil || v.Account.SameAuthorization(current)
+}
+
 func (p *Pool) requestLoginCode(ctx context.Context, st WmpfSession, appID string) (map[string]any, error) {
 	host := st.Session.HostAppID
 	if len(host) == 0 {
@@ -75,7 +125,7 @@ func (p *Pool) RecoverCodeSession(ctx context.Context, acc *store.WechatAccount,
 			defer release(p.loginSem)
 			return p.loginAndSession(ctx, buffer, proxy, fallback, device)
 		}, func(ctx context.Context) (string, error) {
-			p.events.Emit("protocol.ticket_requested", eventlog.ForAccount(acc))
+			p.events.Emit("protocol.ticket_requested", eventlog.ForAccount(acc).WithTarget(appID, eventlog.OpGetCode, ""))
 			return fetch(ctx)
 		}, func(ctx context.Context, st WmpfSession) (map[string]any, error) {
 			return p.requestLoginCode(ctx, st, appID)
@@ -140,6 +190,12 @@ func (p *Pool) recoverCodeSession(ctx context.Context, acc *store.WechatAccount,
 	if current.SessionOnly() && !p.hasNativeRecovery(ctx, current.ID, proxy) || current.Status != nil && *current.Status == "expired" {
 		return nil, original
 	}
+	if p.sessionRecentlyVerified(current, proxy) {
+		// A request just succeeded on this very session, so this -14 belongs to
+		// the AppID alone. Another ManualAuth and ticket would only add logins.
+		p.events.Emit("protocol.recovery_deferred", eventlog.ForAccount(current).WithTarget(appID, eventlog.OpGetCode, ""))
+		return nil, original
+	}
 	key := fmt.Sprintf("%d\x00%s\x00%s", acc.ID, proxy, appID)
 	p.mu.Lock()
 	for k, attempt := range p.codeRepairs {
@@ -154,10 +210,10 @@ func (p *Pool) recoverCodeSession(ctx context.Context, acc *store.WechatAccount,
 	}
 	p.mu.Unlock()
 	if !allowed {
-		p.events.Emit("protocol.recovery_deferred", eventlog.ForAccount(current))
+		p.events.Emit("protocol.recovery_deferred", eventlog.ForAccount(current).WithTarget(appID, eventlog.OpGetCode, ""))
 		return nil, original
 	}
-	p.events.Emit("protocol.recovery_started", eventlog.ForAccount(current))
+	p.events.Emit("protocol.recovery_started", eventlog.ForAccount(current).WithTarget(appID, eventlog.OpGetCode, ""))
 	st, result, err := probe(ctx)
 	if err != nil {
 		return fail(fmt.Errorf("code session recovery failed: %w", err))
@@ -183,7 +239,8 @@ func (p *Pool) recoverCodeSession(ctx context.Context, acc *store.WechatAccount,
 			return fail(store.ErrAccountAuthorizationChanged)
 		}
 	}
-	p.events.Emit("protocol.recovered", eventlog.ForAccount(current))
+	p.events.Emit("protocol.recovered", eventlog.ForAccount(current).WithTarget(appID, eventlog.OpGetCode, ""))
+	p.markSessionVerified(current, current.ID, proxy)
 	p.mu.Lock()
 	delete(p.codeRepairs, key)
 	p.mu.Unlock()
