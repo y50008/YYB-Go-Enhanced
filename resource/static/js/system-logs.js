@@ -5,6 +5,7 @@
   const levels = {debug:"调试",info:"信息",warn:"警告",error:"错误"};
   const stages = {refresh_token:"凭据续期",check_login:"授权检查",login_buffer:"登录票据",manual_auth:"会话登录",native_autoauth_transport:"独立恢复·传输",native_autoauth_application:"独立恢复·应用",native_autoauth_business:"独立恢复·业务",shortlink_transport:"短连接·传输",shortlink_application:"短连接·应用",pcmgr_login_buffer:"PCMgr 票据",pcmgr_key_renewal:"PCMgr 续期",circuit_target:"熔断·目标",circuit_session:"熔断·会话"};
   const operations = {get_code:"取码", get_phone_number:"手机号", operate_wx_data:"operateWxData"};
+  const sources = {on_demand:"按需", manual:"手动"};
   const cursors = [0];
   let page = 0, next = 0, pending = false, timer, sequence = 0;
   let filters = new URLSearchParams(), since = 0;
@@ -34,7 +35,7 @@
       const disclosure = el("details", undefined, "log-detail"), dl = el("dl");
       disclosure.append(el("summary", "查看详情"));
       const operation = details.operation ? `${operations[details.operation] || details.operation}${details.api ? ` · ${details.api}` : ""}` : "";
-      const values = [["事件", entry.event], ["路径", details.route], ["方法", details.method], ["HTTP", details.http_status], ["AppID", details.app_id], ["操作", operation], ["耗时", details.duration_ms !== undefined ? `${details.duration_ms} ms` : ""], ["丢弃条数", details.count]];
+      const values = [["事件", entry.event], ["路径", details.route], ["方法", details.method], ["HTTP", details.http_status], ["AppID", details.app_id], ["操作", operation], ["来源", sources[details.source] || details.source], ["耗时", details.duration_ms !== undefined ? `${details.duration_ms} ms` : ""], ["丢弃条数", details.count]];
       for (const [label, value] of values) if (value !== undefined && value !== "" && value !== 0) dl.append(el("dt", label), el("dd", String(value)));
       disclosure.append(dl); message.append(disclosure);
       tr.append(timeCell, severity, el("td", categories[entry.category] || entry.category), account, message); fragment.append(tr);

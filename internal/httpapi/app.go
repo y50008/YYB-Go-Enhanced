@@ -1435,7 +1435,7 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 	}
 	// Credential recovery always uses the account's refresh route, even when
 	// this protocol call explicitly selected direct egress.
-	status, _, refreshErr := a.refreshAccount(ctx, acc, true)
+	status, _, refreshErr := a.refreshAccount(withRefreshSource(ctx, eventlog.SourceOnDemand), acc, true)
 	status = a.finishLivenessRefresh(ctx, acc, status)
 	if status != "alive" {
 		if status == "expired" {

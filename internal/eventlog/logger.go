@@ -45,6 +45,8 @@ var catalog = map[string]definition{
 	"keepalive.renewed":          {"keepalive", "info", "后台凭据续期完成"},
 	"account.expired":            {"account", "warn", "账号授权失效，需重新扫码"},
 	"account.scanned":            {"account", "info", "扫码授权已保存"},
+	"account.refreshed":          {"account", "info", "凭据已按需或手动刷新"},
+	"account.refresh_failed":     {"account", "warn", "凭据按需或手动刷新失败"},
 	"account.notified":           {"account", "info", "已推送掉线提醒"},
 	"account.notify_failed":      {"account", "warn", "掉线提醒推送失败"},
 }
@@ -72,8 +74,22 @@ type Fields struct {
 	AppID      string      `json:"app_id,omitempty"`
 	Operation  string      `json:"operation,omitempty"`
 	API        string      `json:"api,omitempty"`
+	Source     string      `json:"source,omitempty"`
 	Rejections []Rejection `json:"rejections,omitempty"`
 	Count      uint64      `json:"count,omitempty"`
+}
+
+// Refresh sources outside the background keepalive loop, which reports its own
+// keepalive.* events.
+const (
+	SourceOnDemand = "on_demand"
+	SourceManual   = "manual"
+)
+
+// WithSource records what asked for a credential refresh.
+func (f Fields) WithSource(source string) Fields {
+	f.Source = source
+	return f
 }
 
 // WithTarget records which AppID and request class an event is about; the
@@ -103,6 +119,10 @@ var (
 	safeAppID   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,40}$`)
 	safeAPIName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,39}$`)
 )
+
+func safeSource(source string) bool {
+	return source == SourceOnDemand || source == SourceManual
+}
 
 func safeOperation(op string) bool {
 	switch op {
@@ -168,6 +188,9 @@ func (l *Logger) Emit(event string, f Fields) {
 	}
 	if !safeAPIName.MatchString(f.API) {
 		f.API = ""
+	}
+	if !safeSource(f.Source) {
+		f.Source = ""
 	}
 	clean := make([]Rejection, 0, 8)
 	for _, r := range f.Rejections {

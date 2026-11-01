@@ -35,3 +35,18 @@ func wxAPIName(op string, payload map[string]any) string {
 	name, _ := payload["api_name"].(string)
 	return strings.TrimSpace(name)
 }
+
+type refreshSourceKey struct{}
+
+// withRefreshSource tags a credential refresh with what asked for it. The
+// background loop leaves its context untagged and reports keepalive.* events
+// itself; business recovery and manual refreshes are tagged so they can be
+// counted separately in the event log.
+func withRefreshSource(ctx context.Context, source string) context.Context {
+	return context.WithValue(ctx, refreshSourceKey{}, source)
+}
+
+func refreshSource(ctx context.Context) string {
+	source, _ := ctx.Value(refreshSourceKey{}).(string)
+	return source
+}

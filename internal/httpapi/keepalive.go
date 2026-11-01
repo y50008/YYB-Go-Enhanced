@@ -175,12 +175,12 @@ func keepAliveAccountTimeout(requestTimeout time.Duration) time.Duration {
 }
 
 func (a *App) refreshLiveness(ctx context.Context, acc *store.WechatAccount) (string, error) {
-	status, _, err := a.refreshAccount(ctx, acc, false)
+	status, _, err := a.refreshAccount(withRefreshSource(ctx, eventlog.SourceManual), acc, false)
 	return a.finishLivenessRefresh(ctx, acc, status), err
 }
 
 func (a *App) refreshLivenessWithProxy(ctx context.Context, acc *store.WechatAccount, proxyValue string, fallbackDirect bool) (string, error) {
-	status, _, err := a.refreshAccountWithPolicy(ctx, acc, true, proxyValue, fallbackDirect, true)
+	status, _, err := a.refreshAccountWithPolicy(withRefreshSource(ctx, eventlog.SourceManual), acc, true, proxyValue, fallbackDirect, true)
 	return a.finishLivenessRefresh(ctx, acc, status), err
 }
 
@@ -197,7 +197,25 @@ func (a *App) refreshAccount(ctx context.Context, acc *store.WechatAccount, forc
 	return a.refreshAccountWithPolicy(ctx, acc, force, "", false, false)
 }
 
+// refreshAccountWithPolicy reports a refresh that was asked for on demand or by
+// hand as account.refreshed / account.refresh_failed. Refreshes with no source
+// (the background loop) are reported by the loop as keepalive.* instead.
 func (a *App) refreshAccountWithPolicy(ctx context.Context, acc *store.WechatAccount, force bool, proxyValue string, fallbackDirect, proxyResolved bool) (string, bool, error) {
+	status, refreshed, err := a.refreshAccountOnce(ctx, acc, force, proxyValue, fallbackDirect, proxyResolved)
+	if source := refreshSource(ctx); source != "" {
+		fields := eventlog.ForAccount(acc).WithSource(source)
+		switch {
+		case refreshed:
+			a.events.Emit("account.refreshed", fields)
+		case err != nil:
+			fields.Rejections = eventRejections(err)
+			a.events.Emit("account.refresh_failed", fields)
+		}
+	}
+	return status, refreshed, err
+}
+
+func (a *App) refreshAccountOnce(ctx context.Context, acc *store.WechatAccount, force bool, proxyValue string, fallbackDirect, proxyResolved bool) (string, bool, error) {
 	lock := a.refreshLockFor(acc.ID)
 	select {
 	case lock <- struct{}{}:
