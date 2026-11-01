@@ -91,17 +91,20 @@ func TestRejectedCodeRecoveryCommitsOnlyValidatedSession(t *testing.T) {
 				}
 			}
 			if outcome != "rescan" && outcome != "credential_rotation" && outcome != "manual_expiry" {
+				// A failed repair (cooldown) and a successful one (the session was
+				// just verified) both hold the same target off.
 				_, _ = pool.recoverCodeSession(ctx, acc, "wx-target", "", original, probe)
-				want := 1
-				if outcome == "success" {
-					want = 2
-				}
-				if calls != want {
-					t.Fatal("failed recovery must cool down; successful recovery must not suppress the next request")
+				if calls != 1 {
+					t.Fatal("a repeated -14 must not start another login right after a repair")
 				}
 				_, _ = pool.recoverCodeSession(ctx, acc, "wx-other", "", original, probe)
-				if calls != want+1 {
-					t.Fatal("one target's cooldown blocked another target")
+				want := 2
+				if outcome == "success" {
+					// The session was just verified, so another AppID's -14 is that AppID's own.
+					want = 1
+				}
+				if calls != want {
+					t.Fatal("a failed repair on one target blocked another; a verified session must not log in again")
 				}
 			}
 		})
@@ -233,5 +236,70 @@ func TestActiveAccountDoesNotConsumeNativeKeyBeforeSavedTicket(t *testing.T) {
 	}
 	if !pool.hasNativeRecovery(ctx, acc.ID, "") {
 		t.Fatal("normal login consumed an independent native key")
+	}
+}
+
+// A -14 inside the fresh-session window follows a request that just succeeded on
+// the same session, so it is the AppID's own refusal and must not log in again.
+func TestFreshSessionSuppressesRecovery(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "yyb.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	status := "alive"
+	acc, err := db.UpsertAccount(ctx, "synthetic-fresh-account", "saved-buffer", nil, nil, nil, nil, map[string]any{"accesstoken": "synthetic-access", "refresh_token_observed_at": 123}, &status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := NewPool(DefaultConfig(), db)
+	original := &ShortlinkRejectedError{Code: -14}
+	probes := 0
+	probe := func(context.Context) (WmpfSession, map[string]any, error) {
+		probes++
+		return WmpfSession{}, nil, errors.New("synthetic ticket refusal")
+	}
+
+	pool.markSessionVerified(acc, acc.ID, "")
+	for _, target := range []string{"wx-a", "wx-b"} {
+		if _, err := pool.recoverCodeSession(ctx, acc, target, "", original, probe); !errors.Is(err, original) {
+			t.Fatalf("suppressed recovery lost the original -14: %v", err)
+		}
+	}
+	if probes != 0 {
+		t.Fatal("recovery ran on a session that had just succeeded")
+	}
+
+	// The verification belongs to one route only.
+	_, _ = pool.recoverCodeSession(ctx, acc, "wx-a", "socks5://example.invalid:1080", original, probe)
+	if probes != 1 {
+		t.Fatal("verification on one route suppressed recovery on another")
+	}
+
+	// After the window a -14 may repair the session again.
+	pool.mu.Lock()
+	key := sessionKey(acc.ID, "")
+	verified := pool.verified[key]
+	verified.At = time.Now().Add(-freshSessionWindow - time.Second)
+	pool.verified[key] = verified
+	pool.mu.Unlock()
+	_, _ = pool.recoverCodeSession(ctx, acc, "wx-b", "", original, probe)
+	if probes != 2 {
+		t.Fatal("recovery stayed suppressed after the window")
+	}
+
+	// A re-scan is a new authorization; the earlier verification no longer applies.
+	pool.markSessionVerified(acc, acc.ID, "")
+	if err := db.SetAccountCredential(ctx, acc.ID, "new-scan-buffer", map[string]any{"accesstoken": "new-scan"}); err != nil {
+		t.Fatal(err)
+	}
+	rescanned, err := db.GetAccount(ctx, acc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = pool.recoverCodeSession(ctx, rescanned, "wx-c", "", original, probe)
+	if probes != 3 {
+		t.Fatal("a verification from before the re-scan suppressed recovery")
 	}
 }
