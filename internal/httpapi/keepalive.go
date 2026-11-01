@@ -318,6 +318,7 @@ func (a *App) setAccountStatus(ctx context.Context, accountID int64, status stri
 		_ = a.db.InvalidateAccountSessions(ctx, accountID)
 		a.invalidateProxyLease(accountID)
 		a.clearKeepAliveRetry(accountID)
+		a.circuit.forget(accountID)
 	}
 	return nil
 }

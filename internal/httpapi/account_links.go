@@ -743,6 +743,7 @@ func (a *App) confirmAccountLinkQR(w http.ResponseWriter, r *http.Request, token
 		}
 		a.invalidateProxyLease(acc.ID)
 		a.clearKeepAliveRetry(acc.ID)
+		a.circuit.forget(acc.ID)
 		a.events.Emit("account.scanned", eventlog.ForAccount(acc))
 		warning := a.syncUpdatedAccountReferences(acc)
 		dropAfterConfirm = true

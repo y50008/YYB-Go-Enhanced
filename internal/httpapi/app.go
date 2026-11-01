@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -73,6 +74,10 @@ type Config struct {
 	NotifyToken              string
 	NotifyTopic              string
 	DisableAccountPushNotify bool
+
+	// DisableCircuitBreaker turns off the local target/session hold-off that
+	// stops repeating an upstream-rejected request.
+	DisableCircuitBreaker bool
 }
 
 type App struct {
@@ -91,6 +96,7 @@ type App struct {
 	qinglong           *qingLongClient
 	auth               *auth.Store
 	notifier           *offlineNotifier
+	circuit            *circuitBreaker
 
 	mu                sync.Mutex
 	qrSessions        map[string]*qrLoginSession
@@ -232,6 +238,7 @@ func NewApp(cfg Config) (*App, error) {
 		fetchUserInfo:      qrClient.LoginBuffers().FetchUserInfo,
 		qinglong:           newQingLongClient(cfg.QingLongType, cfg.QingLongURL, cfg.QingLongClientID, cfg.QingLongSecret, cfg.RequestTimeout),
 		notifier:           newOfflineNotifier(offlineNotifyTimeout),
+		circuit:            newCircuitBreaker(circuitConfigFor(cfg.DisableCircuitBreaker)),
 		qrSessions:         map[string]*qrLoginSession{},
 		quickSessions:      map[string]quickLoginSession{},
 		loginAttempts:      map[string]loginAttempt{},
@@ -901,6 +908,8 @@ func (a *App) handleNamedWXOperation(w http.ResponseWriter, r *http.Request, pat
 		case strings.Contains(err.Error(), " is required"):
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
+		case writeIfCircuitOpen(w, err):
+			return
 		}
 		writeProtocolCallError(w, err)
 		return
@@ -1073,6 +1082,7 @@ func (a *App) callWXApp(w http.ResponseWriter, r *http.Request, requirePayload b
 		switch {
 		case errors.As(err, &expired):
 			writeAccountExpired(w, expired)
+		case writeIfCircuitOpen(w, err):
 		default:
 			writeProtocolCallError(w, err)
 		}
@@ -1290,6 +1300,8 @@ func (a *App) storeFromScan(ctx context.Context, loginBuffer string, creds proto
 	status := "alive"
 	acc, err := a.db.UpsertAccount(ctx, openid, loginBuffer, stringPtrMaybe(nick), stringPtrMaybe(nick), stringPtrMaybe(avatar), userInfo, creds.ToMapForScan(), &status)
 	if err == nil {
+		// A new authorization starts with a clean breaker.
+		a.circuit.forget(acc.ID)
 		a.events.Emit("account.scanned", eventlog.ForAccount(acc))
 	}
 	return acc, err
@@ -1324,7 +1336,12 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 		fields.DurationMS = time.Since(started).Milliseconds()
 		fields.Rejections = eventRejections(errOut)
 		event := "protocol.succeeded"
-		if errOut != nil {
+		var open *circuitOpenError
+		switch {
+		case errors.As(errOut, &open):
+			// A locally short-circuited request never reached the upstream.
+			event = "protocol.circuit_deferred"
+		case errOut != nil:
 			event = "protocol.failed"
 		}
 		a.events.Emit(event, fields)
@@ -1338,11 +1355,15 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 	if accountNeedsRescan(acc) {
 		return nil, accountExpiredError{accountID: acc.ID, openid: acc.OpenID}
 	}
+	if breakerErr := a.circuit.check(acc.ID, appID); breakerErr != nil {
+		return nil, breakerErr
+	}
 	proxyValue, fallbackDirect, err := a.resolveWXAppProxy(ctx, acc.ID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve account proxy: %w", err)
 	}
 	result, callErr := call(ctx, acc, appID, payload, proxyValue, fallbackDirect)
+	a.recordCircuitOutcome(acc, appID, callErr)
 	if callErr == nil {
 		return result, nil
 	}
@@ -1429,6 +1450,28 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 		acc = fresh
 	}
 	return call(ctx, acc, appID, payload, proxyValue, fallbackDirect)
+}
+
+// recordCircuitOutcome classifies one protocol result for the breaker. Only an
+// application -14 or an empty code count toward holding a target or session
+// off; network, ManualAuth and OAuth failures are handled elsewhere and never
+// trip it. A success clears the account's breaker state.
+func (a *App) recordCircuitOutcome(acc *store.WechatAccount, appID string, callErr error) {
+	outcome := circuitOther
+	switch {
+	case callErr == nil:
+		outcome = circuitOK
+	case protocol.IsApplicationRequestRejection(callErr):
+		outcome = circuitAppReject
+	case errors.Is(callErr, protocol.ErrLoginCodeUnavailable):
+		outcome = circuitEmptyCode
+	}
+	if scope := a.circuit.record(acc.ID, appID, outcome); scope != "" {
+		fields := eventlog.ForAccount(acc)
+		fields.Rejections = []eventlog.Rejection{{Stage: "circuit_" + scope}}
+		a.events.Emit("protocol.circuit_open", fields)
+		log.Printf("protocol: account id=%d %s circuit opened to stop repeating a rejected request", acc.ID, scope)
+	}
 }
 
 func (a *App) fetchAccountLoginBuffer(ctx context.Context, acc *store.WechatAccount) (string, error) {

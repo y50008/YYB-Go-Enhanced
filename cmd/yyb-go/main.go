@@ -145,6 +145,8 @@ func main() {
 		NotifyToken:              os.Getenv("YYB_NOTIFY_TOKEN"),
 		NotifyTopic:              os.Getenv("YYB_NOTIFY_TOPIC"),
 		DisableAccountPushNotify: strings.EqualFold(strings.TrimSpace(os.Getenv("YYB_NOTIFY_ACCOUNT_PUSH")), "false"),
+
+		DisableCircuitBreaker: strings.EqualFold(strings.TrimSpace(os.Getenv("YYB_CIRCUIT_BREAKER")), "off"),
 	}
 
 	if *resetAdmin != "" {
