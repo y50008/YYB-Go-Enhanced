@@ -46,4 +46,4 @@
 
 ## 五、验收统计口径与缺口
 
-需要分别统计后台续期、按需刷新、票据重建、原始期限后的真实业务成功，以及请求自身的状态变化。现有运行日志覆盖后台续期（`keepalive.renewed` / `keepalive.failed`）、票据重建（`protocol.ticket_requested` / `protocol.recovered`）和业务成功（`protocol.succeeded`）。**缺口：业务路径里的按需凭据刷新没有独立事件**（`keepalive.*` 只由后台循环发出），目前无法单独统计，需要补一个带来源（后台 / 按需 / 手动）和结果的刷新事件后，才能给出完整验收数字。
+需要分别统计后台续期、按需刷新、票据重建、原始期限后的真实业务成功，以及请求自身的状态变化。现有运行日志覆盖后台续期（`keepalive.renewed` / `keepalive.failed`）、票据重建（`protocol.ticket_requested` / `protocol.recovered`）和业务成功（`protocol.succeeded`）。v0.2.60 之前业务路径里的按需凭据刷新没有独立事件（`keepalive.*` 只由后台循环发出）。v0.2.60 起补上 `account.refreshed` / `account.refresh_failed`，details 的 `source` 为 `on_demand`（业务调用恢复）或 `manual`（面板 / 接口手动刷新），后台续期仍是 `keepalive.*`，五类数字都可以分别统计。
