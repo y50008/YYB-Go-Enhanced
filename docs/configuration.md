@@ -197,6 +197,33 @@ YYB_ENABLE_PC_LOGIN=false
 - 微信版本或 OAuth Cookie 会话不兼容时会自动回退到手机扫码。
 - 该流程仍需要用户确认，不提供无交互的静默登录。
 
+## 协议设备标识（v0.2.58 起）
+
+```dotenv
+YYB_DEVICE_IDENTITY=stable
+```
+
+默认 `stable`：每个账号固定一套设备，ManualAuth 的 AppDeviceId 和每个取码 / 取号 / 转发请求携带的设备地址都保持不变，与官方客户端持久保存设备的做法一致。设备由实例首次启动时生成并保存在 `app_settings` 的随机种子与账号 OpenID 派生，重启、缓存重建、重新扫码都不变；不同账号、不同部署之间互不相同。旧版每次握手和每个请求都换新的随机设备。
+
+改为 `random` 可完全恢复旧行为。其他值会在启动时报错。已有协议会话不会因升级重新握手，下一次握手才使用固定设备；会话自带的原生 AutoAuth 仍使用建立时的设备。这是贴近官方行为、降低“同一账号频繁出现新设备”的调整，不能保证上游不再拒绝授权。
+
+## 掉线通知（v0.2.58 起）
+
+账号因授权被拒变为“需重新扫码”或“需补授权”时，每次授权只推送一次提醒；重新扫码后再次失效会重新提醒。手动标记失效不推送。
+
+```dotenv
+YYB_NOTIFY_CHANNEL=pushplus
+YYB_NOTIFY_TOKEN=你的 token
+YYB_NOTIFY_TOPIC=
+YYB_NOTIFY_ACCOUNT_PUSH=true
+```
+
+- `YYB_NOTIFY_CHANNEL`：`serverchan`（Server酱，支持 Server酱³ 的 `sctp` 开头 SendKey）、`pushplus` 或 `qywx`（企业微信群机器人 key）；留空关闭管理员渠道。设置了渠道却没有 token、或渠道名无效时启动报错。
+- `YYB_NOTIFY_TOPIC`：仅 PushPlus 群组编码使用。
+- `YYB_NOTIFY_ACCOUNT_PUSH`：默认 `true`，账号已在面板配置脚本推送渠道时，也推送到该账号自己的渠道，多用户部署可以通知到账号主人；设为 `false` 只推送到管理员渠道。令牌仍保存在面板环境变量中，仅在发送时读取。
+
+推送内容只含账号编号、备注 / 昵称、渠道、状态、时间和数字诊断码，不含 OpenID、凭据或 token。发送是异步的，不阻塞续期和协议请求；结果记录在“运行日志”的 `account.notified` / `account.notify_failed`。
+
 ## 数据目录与备份
 
 Compose 默认持久化：

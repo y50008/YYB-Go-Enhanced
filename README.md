@@ -50,6 +50,8 @@ v0.2.55 针对回退 v0.2.49 后恢复取码的反馈，恢复同渠道保存票
 
 v0.2.57 起 AS **默认启用 `legacy_auth` 历史刷新策略**，无需另开开关；PM 独立续期不变。原默认策略已有延时失效记录，兼容路径目前仅验证即时刷新与取码，长期保活仍未证实。已有配置显式写了 `YYB_APPSTORE_REFRESH_MODE=source` 时需删除该项或改为 `legacy_auth`，Docker 更新后需重新创建容器；显式 `source` 仍可回退。见[问题对比与配置说明](docs/legacy-refresh-mode.md)。v0.2.56 首次引入该兼容策略，当时默认未开启。
 
+v0.2.58 默认**每个账号固定一套协议设备**（`YYB_DEVICE_IDENTITY=stable`），不再每次握手、每个请求都换新的随机设备；修复 legacy 模式下失效账号停在 `unknown` 并每 2 分钟重试的问题；新增[掉线通知](docs/configuration.md#掉线通知v0258-起)，授权被拒需要重新扫码时推送到管理员渠道和账号自己的推送渠道。正式环境取证显示授权在续期窗口前已被上游拒绝，本版不宣称长期保活已解决，见[取证与验证边界](docs/device-identity-offline-notify-20261101.md)。
+
 已对 #116 提供的独立 runtime 包完成真实扫码验证：登录成功，取码仍被 `-12 / no permission` 拒绝，包内未实现续期。见[请求通路与实测记录](docs/runtime-transfer-review-20261030.md)；目前未作为正式扫码渠道接入。
 
 此前的[失效误判修复](docs/proxy-keepalive.md#约两小时后失效的排查96)、[脚本可用性记录](scripts/README.md#脚本可用性记录97-2026-10-19)、[管理员密码恢复](docs/configuration.md#忘记管理员密码v0232-起)、[LongLink 回退](docs/proxy-keepalive.md#保活成功但-getcode-超时)与[面板变量原位更新](docs/panel-integration.md#重复变量处理)继续保留。
