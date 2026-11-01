@@ -66,3 +66,39 @@ func TestConcurrentEmitAndClose(t *testing.T) {
 	wg.Wait()
 	l.Close()
 }
+
+func TestTargetFieldsKeepOnlyPlainIdentifiers(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "logs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	l, err := New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Emit("protocol.failed", Fields{AccountID: 1, Channel: "yyb"}.WithTarget("wx91d27dbf599dff74", OpOperateWXData, "getUserInfo"))
+	l.Emit("protocol.failed", Fields{AccountID: 2, Channel: "yyb"}.WithTarget("wx?token=secret value", "private-token", "bad name!"))
+	l.Close()
+	entries, err := db.ListSystemLogs(context.Background(), store.SystemLogFilter{Limit: 10})
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("entries=%d error=%v", len(entries), err)
+	}
+	for _, entry := range entries {
+		details := string(entry.Details)
+		switch entry.AccountID {
+		case 1:
+			for _, want := range []string{`"app_id":"wx91d27dbf599dff74"`, `"operation":"operate_wx_data"`, `"api":"getUserInfo"`} {
+				if !strings.Contains(details, want) {
+					t.Fatalf("valid target dropped %s: %s", want, details)
+				}
+			}
+		case 2:
+			for _, bad := range []string{"app_id", "operation", "api", "secret", "private-token"} {
+				if strings.Contains(details, bad) {
+					t.Fatalf("unsafe target text %q kept: %s", bad, details)
+				}
+			}
+		}
+	}
+}

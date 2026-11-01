@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"yyb_go/internal/eventlog"
 	"yyb_go/internal/proxysource"
 )
 
@@ -165,7 +166,7 @@ func (a *App) handleIntegrationGetCode(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	result, err := a.invokeWXApp(r.Context(), account, strings.TrimSpace(body.AppID), nil, a.invokeGetCode)
+	result, err := a.invokeWXApp(withWXOperationContext(r.Context(), eventlog.OpGetCode), account, strings.TrimSpace(body.AppID), nil, a.invokeGetCode)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return

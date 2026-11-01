@@ -819,35 +819,35 @@ func (a *App) handleGetCode(w http.ResponseWriter, r *http.Request) {
 	if !acceptWXAppRoute(w, r, "/wxapp/getCode") {
 		return
 	}
-	a.callWXApp(w, r, false, a.invokeGetCode)
+	a.callWXApp(w, withWXOperation(r, eventlog.OpGetCode), false, a.invokeGetCode)
 }
 
 func (a *App) handleWXCodeAlias(w http.ResponseWriter, r *http.Request) {
 	if !acceptWXAppRoute(w, r, "/wx/code") {
 		return
 	}
-	a.callWXApp(w, r, false, a.invokeGetCode)
+	a.callWXApp(w, withWXOperation(r, eventlog.OpGetCode), false, a.invokeGetCode)
 }
 
 func (a *App) handleGetPhoneNumber(w http.ResponseWriter, r *http.Request) {
 	if !acceptWXAppRoute(w, r, "/wxapp/getPhoneNumber") {
 		return
 	}
-	a.callWXApp(w, r, false, a.invokeGetPhoneNumber)
+	a.callWXApp(w, withWXOperation(r, eventlog.OpGetPhoneNumber), false, a.invokeGetPhoneNumber)
 }
 
 func (a *App) handleWXPhoneAlias(w http.ResponseWriter, r *http.Request) {
 	if !acceptWXAppRoute(w, r, "/wx/getphonenumber") {
 		return
 	}
-	a.callWXApp(w, r, false, a.invokeGetPhoneNumber)
+	a.callWXApp(w, withWXOperation(r, eventlog.OpGetPhoneNumber), false, a.invokeGetPhoneNumber)
 }
 
 func (a *App) handleOperateWXData(w http.ResponseWriter, r *http.Request) {
 	if !acceptWXAppRoute(w, r, "/wxapp/operateWxData") {
 		return
 	}
-	a.callWXApp(w, r, true, a.invokeOperateWXData)
+	a.callWXApp(w, withWXOperation(r, eventlog.OpOperateWXData), true, a.invokeOperateWXData)
 }
 
 func (a *App) handleWXEncryptKey(w http.ResponseWriter, r *http.Request) {
@@ -934,7 +934,7 @@ func (a *App) invokeNamedWXOperation(ctx context.Context, body wxappRequest, api
 	if apiName == encryptKeyOperation {
 		body.Payload = normalizeEncryptKeyPayload(body.Payload)
 	}
-	result, err := a.invokeWXApp(ctx, acc, body.AppID, body.Payload, a.invokeOperateWXData)
+	result, err := a.invokeWXApp(withWXOperationContext(ctx, eventlog.OpOperateWXData), acc, body.AppID, body.Payload, a.invokeOperateWXData)
 	if err != nil {
 		return nil, err
 	}
@@ -1331,8 +1331,9 @@ func (e accountExpiredError) Unwrap() error { return e.cause }
 
 func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID string, payload map[string]any, call wxappCall) (resultOut map[string]any, errOut error) {
 	started := time.Now()
+	op := wxOperation(ctx)
 	defer func() {
-		fields := eventlog.ForAccount(acc)
+		fields := eventlog.ForAccount(acc).WithTarget(appID, op, wxAPIName(op, payload))
 		fields.DurationMS = time.Since(started).Milliseconds()
 		fields.Rejections = eventRejections(errOut)
 		event := "protocol.succeeded"
@@ -1355,7 +1356,7 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 	if accountNeedsRescan(acc) {
 		return nil, accountExpiredError{accountID: acc.ID, openid: acc.OpenID}
 	}
-	if breakerErr := a.circuit.check(acc.ID, appID); breakerErr != nil {
+	if breakerErr := a.circuit.check(acc.ID, appID, op); breakerErr != nil {
 		return nil, breakerErr
 	}
 	proxyValue, fallbackDirect, err := a.resolveWXAppProxy(ctx, acc.ID)
@@ -1363,7 +1364,7 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 		return nil, fmt.Errorf("resolve account proxy: %w", err)
 	}
 	result, callErr := call(ctx, acc, appID, payload, proxyValue, fallbackDirect)
-	a.recordCircuitOutcome(acc, appID, callErr)
+	a.recordCircuitOutcome(acc, appID, op, callErr)
 	if callErr == nil {
 		return result, nil
 	}
@@ -1456,7 +1457,7 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 // application -14 or an empty code count toward holding a target or session
 // off; network, ManualAuth and OAuth failures are handled elsewhere and never
 // trip it. A success clears the account's breaker state.
-func (a *App) recordCircuitOutcome(acc *store.WechatAccount, appID string, callErr error) {
+func (a *App) recordCircuitOutcome(acc *store.WechatAccount, appID, op string, callErr error) {
 	outcome := circuitOther
 	switch {
 	case callErr == nil:
@@ -1466,8 +1467,8 @@ func (a *App) recordCircuitOutcome(acc *store.WechatAccount, appID string, callE
 	case errors.Is(callErr, protocol.ErrLoginCodeUnavailable):
 		outcome = circuitEmptyCode
 	}
-	if scope := a.circuit.record(acc.ID, appID, outcome); scope != "" {
-		fields := eventlog.ForAccount(acc)
+	if scope := a.circuit.record(acc.ID, appID, op, outcome); scope != "" {
+		fields := eventlog.ForAccount(acc).WithTarget(appID, op, "")
 		fields.Rejections = []eventlog.Rejection{{Stage: "circuit_" + scope}}
 		a.events.Emit("protocol.circuit_open", fields)
 		log.Printf("protocol: account id=%d %s circuit opened to stop repeating a rejected request", acc.ID, scope)
