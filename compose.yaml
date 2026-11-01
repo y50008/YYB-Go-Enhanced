@@ -49,6 +49,7 @@ services:
       YYB_NOTIFY_TOKEN: ${YYB_NOTIFY_TOKEN:-}
       YYB_NOTIFY_TOPIC: ${YYB_NOTIFY_TOPIC:-}
       YYB_NOTIFY_ACCOUNT_PUSH: ${YYB_NOTIFY_ACCOUNT_PUSH:-true}
+      YYB_CIRCUIT_BREAKER: ${YYB_CIRCUIT_BREAKER:-on}
     volumes:
       - ./data/db:/app/resource/db
       - ./data/avatars:/app/resource/avatars
