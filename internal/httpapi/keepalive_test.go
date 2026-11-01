@@ -414,6 +414,10 @@ func newKeepAliveTestApp(t *testing.T) *App {
 	if err != nil {
 		t.Fatalf("NewApp() error = %v", err)
 	}
+	// Tests opt in to a check-login result; never reach the real endpoint.
+	app.checkLogin = func(context.Context, protocol.LoginBufferCredentials) (protocol.LoginBufferCredentials, error) {
+		return protocol.LoginBufferCredentials{}, errors.New("check login is not stubbed in this test")
+	}
 	return app
 }
 

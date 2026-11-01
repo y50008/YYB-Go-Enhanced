@@ -43,6 +43,8 @@ var catalog = map[string]definition{
 	"keepalive.renewed":          {"keepalive", "info", "后台凭据续期完成"},
 	"account.expired":            {"account", "warn", "账号授权失效，需重新扫码"},
 	"account.scanned":            {"account", "info", "扫码授权已保存"},
+	"account.notified":           {"account", "info", "已推送掉线提醒"},
+	"account.notify_failed":      {"account", "warn", "掉线提醒推送失败"},
 }
 
 type Rejection struct {

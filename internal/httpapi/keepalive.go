@@ -16,7 +16,10 @@ import (
 	"yyb_go/internal/store"
 )
 
-const keepAliveRetryBackoff = 5 * time.Minute
+const (
+	keepAliveRetryBackoff        = 5 * time.Minute
+	keepAliveExpiredRetryBackoff = 15 * time.Minute
+)
 
 func (a *App) startKeepAlive() {
 	if a.cfg.KeepAliveInterval <= 0 {
@@ -25,7 +28,7 @@ func (a *App) startKeepAlive() {
 	ctx, cancel := context.WithCancel(context.Background())
 	a.keepAliveCancel = cancel
 	a.keepAliveDone = make(chan struct{})
-	log.Printf("keepalive: enabled interval=%s refresh_ahead=%s appstore_refresh=%s", a.cfg.KeepAliveInterval, a.cfg.KeepAliveAhead, a.cfg.ASRefreshMode)
+	log.Printf("keepalive: enabled interval=%s refresh_ahead=%s appstore_refresh=%s device_identity=%s", a.cfg.KeepAliveInterval, a.cfg.KeepAliveAhead, a.cfg.ASRefreshMode, a.cfg.DeviceIdentity)
 	go func() {
 		defer close(a.keepAliveDone)
 		a.keepAliveLoop(ctx)
@@ -151,8 +154,13 @@ func keepAliveFailureBackoff(creds protocol.LoginBufferCredentials, now time.Tim
 	if creds.Provider == "pcmgr" {
 		return keepAliveRetryBackoff
 	}
-	// A five-minute delay would skip the entire official four-minute window.
 	remaining := time.Unix(creds.ExpiresAt, 0).Sub(now)
+	if remaining <= 0 {
+		// The token has lapsed, so the renewal window is gone; retrying every
+		// tick only repeats a rejected request upstream.
+		return keepAliveExpiredRetryBackoff
+	}
+	// A five-minute delay would skip the entire official four-minute window.
 	return min(keepAliveRetryBackoff, max(30*time.Second, remaining/2))
 }
 
@@ -253,6 +261,7 @@ func (a *App) refreshAccountWithPolicy(ctx context.Context, acc *store.WechatAcc
 				a.invalidateProxyLease(latest.ID)
 			}
 			a.clearKeepAliveRetry(latest.ID)
+			a.notifyOffline(latest, status, err)
 		}
 		return status, false, err
 	}
@@ -412,14 +421,28 @@ func (a *App) refreshCredentialsWithProxy(ctx context.Context, creds protocol.Lo
 			}
 		}()
 	}
-	if proxyValue == "" {
-		return a.refreshCredentials(ctx, creds)
+	refresh, checkLogin := a.refreshCredentials, a.checkLogin
+	if proxyValue != "" {
+		client, err := qr.NewClientWithProxy(a.cfg.RequestTimeout, proxyValue, fallbackDirect)
+		if err != nil {
+			return protocol.LoginBufferCredentials{}, err
+		}
+		refresh, checkLogin = client.LoginBuffers().RefreshCredentials, client.LoginBuffers().CheckLogin
 	}
-	client, err := qr.NewClientWithProxy(a.cfg.RequestTimeout, proxyValue, fallbackDirect)
-	if err != nil {
-		return protocol.LoginBufferCredentials{}, err
+	refreshed, err = refresh(ctx, creds)
+	var rejected *protocol.RefreshRejectedError
+	if legacy && source != "pc_yyb_auth" && checkLogin != nil && errors.As(err, &rejected) && rejected.Code == -109 && ctx.Err() == nil {
+		// _auth wraps a rejected QR credential as an ambiguous -109. Without
+		// the official check-login (one request, as source mode does) a revoked
+		// account never reaches a conclusive WeChat code and retries forever.
+		// This is a check on the same egress, not the other refresh route.
+		checked, checkErr := checkLogin(ctx, creds)
+		if checkErr == nil {
+			return checked, nil
+		}
+		return protocol.LoginBufferCredentials{}, fmt.Errorf("%w; check login: %w", err, checkErr)
 	}
-	return client.LoginBuffers().RefreshCredentials(ctx, creds)
+	return refreshed, err
 }
 
 func (a *App) fetchUserInfoWithProxy(ctx context.Context, creds protocol.LoginBufferCredentials, proxyValue string, fallbackDirect bool) (map[string]any, error) {

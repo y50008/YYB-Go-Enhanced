@@ -45,6 +45,7 @@ type Config struct {
 	KeepAliveInterval time.Duration
 	KeepAliveAhead    time.Duration
 	ASRefreshMode     string
+	DeviceIdentity    string
 	QingLongType      string
 	QingLongURL       string
 	QingLongClientID  string
@@ -64,6 +65,14 @@ type Config struct {
 	CookieSecure    bool
 	EnablePCLogin   bool
 	SessionDuration time.Duration
+
+	// NotifyChannel/Token/Topic configure the operator's offline notices.
+	// Accounts with a script push channel also notify that channel unless
+	// DisableAccountPushNotify is set.
+	NotifyChannel            string
+	NotifyToken              string
+	NotifyTopic              string
+	DisableAccountPushNotify bool
 }
 
 type App struct {
@@ -75,11 +84,13 @@ type App struct {
 	pool               *protocol.Pool
 	qr                 *qr.Client
 	refreshCredentials func(context.Context, protocol.LoginBufferCredentials) (protocol.LoginBufferCredentials, error)
+	checkLogin         func(context.Context, protocol.LoginBufferCredentials) (protocol.LoginBufferCredentials, error)
 	fetchLoginBuffer   func(context.Context, protocol.LoginBufferCredentials) (string, error)
 	exchangeAuthCode   func(context.Context, string) (protocol.LoginBufferResult, error)
 	fetchUserInfo      func(context.Context, protocol.LoginBufferCredentials) (map[string]any, error)
 	qinglong           *qingLongClient
 	auth               *auth.Store
+	notifier           *offlineNotifier
 
 	mu                sync.Mutex
 	qrSessions        map[string]*qrLoginSession
@@ -118,6 +129,25 @@ func NewApp(cfg Config) (*App, error) {
 	case "source":
 	default:
 		return nil, errors.New("YYB_APPSTORE_REFRESH_MODE must be source or legacy_auth")
+	}
+	cfg.DeviceIdentity = strings.ToLower(strings.TrimSpace(cfg.DeviceIdentity))
+	switch cfg.DeviceIdentity {
+	case "", protocol.DeviceIdentityStable:
+		cfg.DeviceIdentity = protocol.DeviceIdentityStable
+	case protocol.DeviceIdentityRandom:
+	default:
+		return nil, errors.New("YYB_DEVICE_IDENTITY must be stable or random")
+	}
+	cfg.NotifyChannel = strings.ToLower(strings.TrimSpace(cfg.NotifyChannel))
+	cfg.NotifyToken = strings.TrimSpace(cfg.NotifyToken)
+	cfg.NotifyTopic = strings.TrimSpace(cfg.NotifyTopic)
+	switch {
+	case cfg.NotifyChannel == "" || cfg.NotifyChannel == "none":
+		cfg.NotifyChannel = ""
+	case !validPushChannel(cfg.NotifyChannel):
+		return nil, errors.New("YYB_NOTIFY_CHANNEL must be serverchan, pushplus or qywx")
+	case cfg.NotifyToken == "":
+		return nil, errors.New("YYB_NOTIFY_TOKEN is required when YYB_NOTIFY_CHANNEL is set")
 	}
 	if cfg.ResourceRoot == "" {
 		cfg.ResourceRoot = filepath.Join(".", "resource")
@@ -185,6 +215,7 @@ func NewApp(cfg Config) (*App, error) {
 	poolCfg := protocol.DefaultConfig()
 	poolCfg.SessionTTL = cfg.SessionTTL
 	poolCfg.ShortlinkTimeout = cfg.RequestTimeout
+	poolCfg.DeviceIdentity = cfg.DeviceIdentity
 	pool := protocol.NewPool(poolCfg, db)
 	qrClient := qr.NewClient(cfg.RequestTimeout)
 	app := &App{
@@ -195,10 +226,12 @@ func NewApp(cfg Config) (*App, error) {
 		pool:               pool,
 		qr:                 qrClient,
 		refreshCredentials: qrClient.LoginBuffers().RefreshCredentials,
+		checkLogin:         qrClient.LoginBuffers().CheckLogin,
 		fetchLoginBuffer:   qrClient.LoginBuffers().FetchLoginBuffer,
 		exchangeAuthCode:   qrClient.GetLoginBufferFromCode,
 		fetchUserInfo:      qrClient.LoginBuffers().FetchUserInfo,
 		qinglong:           newQingLongClient(cfg.QingLongType, cfg.QingLongURL, cfg.QingLongClientID, cfg.QingLongSecret, cfg.RequestTimeout),
+		notifier:           newOfflineNotifier(offlineNotifyTimeout),
 		qrSessions:         map[string]*qrLoginSession{},
 		quickSessions:      map[string]quickLoginSession{},
 		loginAttempts:      map[string]loginAttempt{},
@@ -254,6 +287,9 @@ func (a *App) Close() error {
 	if a.accountLinkCancel != nil {
 		a.stopAccountLinkCleanup()
 	}
+	// Offline notices are bounded by offlineNotifyTimeout and may still read
+	// the account's push setting; finish them before closing the database.
+	a.notifier.wait()
 	if a.db != nil {
 		a.events.Emit("system.stopped", eventlog.Fields{})
 		a.events.Close()
@@ -1323,6 +1359,7 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 			if !applied {
 				return nil, store.ErrAccountAuthorizationChanged
 			}
+			a.notifyOffline(acc, "expired", callErr)
 			return nil, accountExpiredError{accountID: acc.ID, openid: acc.OpenID, cause: callErr}
 		}
 		// A request using the retained PSK cannot trigger OAuth or ManualAuth.
