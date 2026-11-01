@@ -114,7 +114,7 @@ func ProbeLocalCode(ctx context.Context, provider string, input, saved []byte) (
 		var buffer string
 		buffer, err = labBuffer(provider, input)
 		if err == nil {
-			st, err = pool.loginAndSession(ctx, buffer, "", false)
+			st, err = pool.loginAndSession(ctx, buffer, "", false, DeviceIdentity{})
 		}
 	} else {
 		st, err = labReadSession(provider, saved)

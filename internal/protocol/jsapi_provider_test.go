@@ -22,7 +22,7 @@ func TestJSAPIRequestsKeepProviderIdentityAndNativeLayout(t *testing.T) {
 				wantHost = hostAppIDDefault
 			}
 			payload := map[string]any{"api_name": "webapi_getuserencryptkey", "data": map[string]any{"kept": true}, "env": 1}
-			operate, err := buildOperateRequest(1234, app, payload, provider.host)
+			operate, err := buildOperateRequest(1234, app, payload, provider.host, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -33,7 +33,7 @@ func TestJSAPIRequestsKeepProviderIdentityAndNativeLayout(t *testing.T) {
 				cmd  int64
 			}{
 				{"login", buildJSAPIPlaintext(1234, app, nil, 0, nil, provider.host, nil), jsLoginURL, 1029},
-				{"phone", buildPhoneRequest(1234, app, provider.host), phoneURL, map[bool]int64{false: 1020, true: 1141}[provider.name == "pcmgr"]},
+				{"phone", buildPhoneRequest(1234, app, provider.host, nil), phoneURL, map[bool]int64{false: 1020, true: 1141}[provider.name == "pcmgr"]},
 				{"operate", operate, operateURL, 1133},
 			} {
 				fields := pbParse(request.raw)

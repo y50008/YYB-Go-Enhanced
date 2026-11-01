@@ -44,6 +44,12 @@ services:
       YYB_UPDATE_PROXY: ${YYB_UPDATE_PROXY:-}
       YYB_UPDATE_VERSION_URL: ${YYB_UPDATE_VERSION_URL:-}
       YYB_APPSTORE_REFRESH_MODE: ${YYB_APPSTORE_REFRESH_MODE:-legacy_auth}
+      YYB_DEVICE_IDENTITY: ${YYB_DEVICE_IDENTITY:-stable}
+      YYB_NOTIFY_CHANNEL: ${YYB_NOTIFY_CHANNEL:-}
+      YYB_NOTIFY_TOKEN: ${YYB_NOTIFY_TOKEN:-}
+      YYB_NOTIFY_TOPIC: ${YYB_NOTIFY_TOPIC:-}
+      YYB_NOTIFY_ACCOUNT_PUSH: ${YYB_NOTIFY_ACCOUNT_PUSH:-true}
+      YYB_CIRCUIT_BREAKER: ${YYB_CIRCUIT_BREAKER:-on}
     volumes:
       - ./data/db:/app/resource/db
       - ./data/avatars:/app/resource/avatars

@@ -34,7 +34,7 @@ func (p *Pool) requestLoginCode(ctx context.Context, st WmpfSession, appID strin
 	if len(host) == 0 {
 		host = hostAppIDDefault
 	}
-	plain := buildJSAPIPlaintext(st.Session.UIN, appID, jsLoginURL, jsLoginCmdID, nil, host, nil)
+	plain := buildJSAPIPlaintext(st.Session.UIN, appID, jsLoginURL, jsLoginCmdID, nil, host, st.Device.SessDevice)
 	envelope, err := buildTransferPacket(st.Session, plain)
 	if err != nil {
 		return nil, err
@@ -53,6 +53,7 @@ func (p *Pool) requestLoginCode(ctx context.Context, st WmpfSession, appID strin
 // Rejected OAuth accounts may only use independent native recovery. A candidate
 // replaces the shared cache only after a nonempty code from the same target.
 func (p *Pool) RecoverCodeSession(ctx context.Context, acc *store.WechatAccount, appID, proxy string, fallback bool, original error, fetch func(context.Context) (string, error)) (map[string]any, error) {
+	device := p.deviceFor(ctx, acc)
 	return p.recoverCodeSession(ctx, acc, appID, proxy, original, func(ctx context.Context) (WmpfSession, map[string]any, error) {
 		if acc.SessionOnly() {
 			saved, err := p.nativeRecoveryState(ctx, acc.ID, proxy)
@@ -63,6 +64,7 @@ func (p *Pool) RecoverCodeSession(ctx context.Context, acc *store.WechatAccount,
 			if err != nil {
 				return WmpfSession{}, nil, err
 			}
+			st.Device = device
 			result, err := p.requestLoginCode(ctx, st, appID)
 			return st, result, err
 		}
@@ -71,7 +73,7 @@ func (p *Pool) RecoverCodeSession(ctx context.Context, acc *store.WechatAccount,
 				return WmpfSession{}, err
 			}
 			defer release(p.loginSem)
-			return p.loginAndSession(ctx, buffer, proxy, fallback)
+			return p.loginAndSession(ctx, buffer, proxy, fallback, device)
 		}, func(ctx context.Context) (string, error) {
 			p.events.Emit("protocol.ticket_requested", eventlog.ForAccount(acc))
 			return fetch(ctx)

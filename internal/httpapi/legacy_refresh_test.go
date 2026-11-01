@@ -38,20 +38,58 @@ func TestLegacyRefreshPolicyKeepsProviderAndCredentialOrigin(t *testing.T) {
 }
 
 func TestLegacyRefreshDoesNotProbeOtherRoutesOnFailure(t *testing.T) {
-	for _, failure := range []error{context.DeadlineExceeded, &protocol.RefreshRejectedError{Code: -109, Message: "42007"}} {
-		app := &App{cfg: Config{ASRefreshMode: "legacy_auth"}}
-		calls := 0
-		app.refreshCredentials = func(_ context.Context, creds protocol.LoginBufferCredentials) (protocol.LoginBufferCredentials, error) {
-			calls++
-			if creds.RefreshBusinessID != "pc_yyb_auth" {
-				t.Fatal("legacy route not selected")
+	revoked := &protocol.RefreshRejectedError{Code: -109, Operation: "check_login", Message: "error 42007 | 42007"}
+	for _, tc := range []struct {
+		name       string
+		source     string
+		failure    error
+		wantChecks int
+	}{
+		{"network error is not probed", "pc_yyb", context.DeadlineExceeded, 0},
+		{"other rejection is not probed", "pc_yyb", &protocol.RefreshRejectedError{Code: -1, Message: "busy"}, 0},
+		{"QR -109 asks check-login once", "pc_yyb", &protocol.RefreshRejectedError{Code: -109, Message: "RC_PARAMS_INVALID"}, 1},
+		{"unmarked QR -109 asks check-login once", "", &protocol.RefreshRejectedError{Code: -109, Message: "RC_PARAMS_INVALID"}, 1},
+		{"wxapp _auth credential is not probed", "pc_yyb_auth", &protocol.RefreshRejectedError{Code: -109, Message: "RC_PARAMS_INVALID"}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := &App{cfg: Config{ASRefreshMode: "legacy_auth"}}
+			refreshes, checks := 0, 0
+			app.refreshCredentials = func(_ context.Context, creds protocol.LoginBufferCredentials) (protocol.LoginBufferCredentials, error) {
+				refreshes++
+				if creds.RefreshBusinessID != "pc_yyb_auth" {
+					t.Fatal("legacy route not selected; the main refresh route must never be tried")
+				}
+				return protocol.LoginBufferCredentials{}, tc.failure
 			}
-			return protocol.LoginBufferCredentials{}, failure
-		}
-		_, err := app.refreshCredentialsWithProxy(context.Background(), protocol.LoginBufferCredentials{RefreshBusinessID: "pc_yyb"}, "", false)
-		if !errors.Is(err, failure) || calls != 1 {
-			t.Fatal("compatibility rejection was swallowed or retried")
-		}
+			app.checkLogin = func(context.Context, protocol.LoginBufferCredentials) (protocol.LoginBufferCredentials, error) {
+				checks++
+				return protocol.LoginBufferCredentials{}, revoked
+			}
+			_, err := app.refreshCredentialsWithProxy(context.Background(), protocol.LoginBufferCredentials{RefreshBusinessID: tc.source}, "", false)
+			if !errors.Is(err, tc.failure) || refreshes != 1 || checks != tc.wantChecks {
+				t.Fatalf("refreshes=%d checks=%d err=%v", refreshes, checks, err)
+			}
+			// Only the check-login answer makes an ambiguous -109 conclusive.
+			if got := definitiveCredentialFailure(err); got != (tc.wantChecks == 1) {
+				t.Fatalf("definitive = %t, want %t: %v", got, tc.wantChecks == 1, err)
+			}
+		})
+	}
+}
+
+func TestLegacyRefreshAcceptsCheckLoginRecovery(t *testing.T) {
+	app := &App{cfg: Config{ASRefreshMode: "legacy_auth"}}
+	app.refreshCredentials = func(context.Context, protocol.LoginBufferCredentials) (protocol.LoginBufferCredentials, error) {
+		return protocol.LoginBufferCredentials{}, &protocol.RefreshRejectedError{Code: -109, Message: "RC_PARAMS_INVALID"}
+	}
+	app.checkLogin = func(_ context.Context, creds protocol.LoginBufferCredentials) (protocol.LoginBufferCredentials, error) {
+		creds.AccessToken = "checked-access"
+		creds.RefreshBusinessID = "pc_yyb"
+		return creds, nil
+	}
+	fresh, err := app.refreshCredentialsWithProxy(context.Background(), protocol.LoginBufferCredentials{RefreshTokenObservedAt: 77}, "", false)
+	if err != nil || fresh.AccessToken != "checked-access" || fresh.RefreshBusinessID != "" || fresh.RefreshTokenObservedAt != 77 {
+		t.Fatalf("check-login recovery = %+v, %v; want rotated access with the original source and scan time", fresh, err)
 	}
 }
 

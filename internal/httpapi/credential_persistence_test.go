@@ -64,12 +64,18 @@ func TestBackgroundRefreshDoesNotFetchLoginBuffer(t *testing.T) {
 
 func TestRefreshRetryFitsInsideExpiryWindow(t *testing.T) {
 	now := time.Now()
-	for _, remaining := range []time.Duration{time.Hour, 4 * time.Minute, time.Minute, -time.Minute} {
+	for _, remaining := range []time.Duration{time.Hour, 4 * time.Minute, time.Minute} {
 		creds := protocol.LoginBufferCredentials{ExpiresAt: now.Add(remaining).Unix()}
 		delay := keepAliveFailureBackoff(creds, now)
 		if delay < 30*time.Second || delay > keepAliveRetryBackoff || (remaining > time.Minute && delay >= remaining) {
 			t.Fatalf("retry delay %s does not fit expiry window %s", delay, remaining)
 		}
+	}
+	// Once the token has lapsed there is no window left to fit; stop
+	// repeating a rejected renewal on every two-minute tick.
+	lapsed := protocol.LoginBufferCredentials{ExpiresAt: now.Add(-time.Minute).Unix()}
+	if delay := keepAliveFailureBackoff(lapsed, now); delay != keepAliveExpiredRetryBackoff {
+		t.Fatalf("lapsed retry delay = %s, want %s", delay, keepAliveExpiredRetryBackoff)
 	}
 }
 

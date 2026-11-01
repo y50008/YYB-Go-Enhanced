@@ -29,6 +29,9 @@ type Config struct {
 	DNSCacheTTL             time.Duration
 	MaxShortlinkConcurrency int
 	MaxLoginConcurrency     int
+	// DeviceIdentity is DeviceIdentityStable (one device per account) or
+	// DeviceIdentityRandom (the historical new device per login/request).
+	DeviceIdentity string
 }
 
 func DefaultConfig() Config {
@@ -39,6 +42,7 @@ func DefaultConfig() Config {
 		DNSCacheTTL:             30 * time.Minute,
 		MaxShortlinkConcurrency: 1000,
 		MaxLoginConcurrency:     32,
+		DeviceIdentity:          DeviceIdentityStable,
 	}
 }
 
@@ -51,8 +55,10 @@ type WmpfSession struct {
 	TCPProxy         string
 	FallbackDirect   bool
 	CachedOnly       bool
-	recoveryRow      *store.SessionRow
-	nativePersisted  bool
+	// Device is derived per account on every use and is never persisted.
+	Device          DeviceIdentity
+	recoveryRow     *store.SessionRow
+	nativePersisted bool
 }
 
 type Pool struct {
@@ -70,6 +76,9 @@ type Pool struct {
 
 	loginSem     chan struct{}
 	shortlinkSem chan struct{}
+
+	deviceSeedMu    sync.Mutex
+	deviceSeedValue []byte
 }
 
 // SetEventLogger is called once before serving requests or starting workers.
@@ -94,6 +103,9 @@ func NewPool(cfg Config, db *store.DB) *Pool {
 	}
 	if cfg.MaxLoginConcurrency == 0 {
 		cfg.MaxLoginConcurrency = def.MaxLoginConcurrency
+	}
+	if cfg.DeviceIdentity == "" {
+		cfg.DeviceIdentity = def.DeviceIdentity
 	}
 	return &Pool{
 		cfg:          cfg,
@@ -170,7 +182,7 @@ func retryLoginCode(ctx context.Context, call func() (map[string]any, error), in
 
 func (p *Pool) GetPhoneNumber(ctx context.Context, loginBuffer, appID string, accountID int64, tcpProxy string, fallbackDirect bool, expected ...*store.WechatAccount) (map[string]any, error) {
 	return p.run(ctx, loginBuffer, accountID, tcpProxy, fallbackDirect, func(ctx context.Context, st WmpfSession) (map[string]any, error) {
-		plain := buildPhoneRequest(st.Session.UIN, appID, st.Session.HostAppID)
+		plain := buildPhoneRequest(st.Session.UIN, appID, st.Session.HostAppID, st.Device.SessDevice)
 		envelope, err := buildTransferPacket(st.Session, plain)
 		if err != nil {
 			return nil, err
@@ -185,7 +197,7 @@ func (p *Pool) GetPhoneNumber(ctx context.Context, loginBuffer, appID string, ac
 
 func (p *Pool) OperateWXData(ctx context.Context, loginBuffer, appID string, payload map[string]any, accountID int64, tcpProxy string, fallbackDirect bool, expected ...*store.WechatAccount) (map[string]any, error) {
 	return p.run(ctx, loginBuffer, accountID, tcpProxy, fallbackDirect, func(ctx context.Context, st WmpfSession) (map[string]any, error) {
-		plain, err := buildOperateRequest(st.Session.UIN, appID, payload, st.Session.HostAppID)
+		plain, err := buildOperateRequest(st.Session.UIN, appID, payload, st.Session.HostAppID, st.Device.SessDevice)
 		if err != nil {
 			return nil, err
 		}
@@ -268,8 +280,10 @@ func (p *Pool) state(ctx context.Context, loginBuffer string, accountID int64, t
 	if len(expected) > 0 && !acc.SameAuthorization(expected[0]) {
 		return WmpfSession{}, store.ErrAccountAuthorizationChanged
 	}
+	device := p.deviceFor(ctx, acc)
 	if st, err := p.cachedSession(ctx, accountID, tcpProxy); err == nil {
 		st.CachedOnly = acc.SessionOnly()
+		st.Device = device
 		return st, nil
 	} else if acc.SessionOnly() && !p.hasNativeRecovery(ctx, accountID, tcpProxy) {
 		return WmpfSession{}, ErrCachedSessionUnavailable
@@ -290,6 +304,7 @@ func (p *Pool) state(ctx context.Context, loginBuffer string, accountID int64, t
 	}
 	if st, err := p.cachedSession(ctx, accountID, tcpProxy); err == nil {
 		st.CachedOnly = acc.SessionOnly()
+		st.Device = device
 		return st, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return WmpfSession{}, err
@@ -308,6 +323,7 @@ func (p *Pool) state(ctx context.Context, loginBuffer string, accountID int64, t
 				return WmpfSession{}, &CodeSessionRecoveryError{Cause: restoreErr}
 			}
 			restored.CachedOnly = true
+			restored.Device = device
 			return restored, nil
 		}
 		return WmpfSession{}, ErrCachedSessionUnavailable
@@ -318,7 +334,7 @@ func (p *Pool) state(ctx context.Context, loginBuffer string, accountID int64, t
 		return WmpfSession{}, err
 	}
 	defer release(p.loginSem)
-	st, err := p.loginAndSession(ctx, loginBuffer, tcpProxy, fallbackDirect)
+	st, err := p.loginAndSession(ctx, loginBuffer, tcpProxy, fallbackDirect, device)
 	if err != nil {
 		return WmpfSession{}, err
 	}
@@ -394,7 +410,7 @@ func (p *Pool) codeLockFor(accountID int64) chan struct{} {
 	return lock
 }
 
-func (p *Pool) loginAndSession(ctx context.Context, loginBuffer, tcpProxy string, fallbackDirect bool) (WmpfSession, error) {
+func (p *Pool) loginAndSession(ctx context.Context, loginBuffer, tcpProxy string, fallbackDirect bool, device DeviceIdentity) (WmpfSession, error) {
 	if loginBuffer == "" {
 		return WmpfSession{}, fmt.Errorf("login_buffer is empty")
 	}
@@ -409,7 +425,7 @@ func (p *Pool) loginAndSession(ctx context.Context, loginBuffer, tcpProxy string
 	}
 	targets = longlinkLoginTargets(targets, 6)
 	st, err := tryLonglinkCandidates(ctx, targets, p.cfg.LoginTimeout, func(attemptCtx context.Context, target Target) (WmpfSession, error) {
-		return p.loginTarget(attemptCtx, target, loginBuffer, tcpProxy, fallbackDirect)
+		return p.loginTarget(attemptCtx, target, loginBuffer, tcpProxy, fallbackDirect, device)
 	})
 	if err != nil {
 		return WmpfSession{}, err
@@ -450,7 +466,7 @@ func tryLonglinkCandidates(ctx context.Context, targets []Target, timeout time.D
 	return WmpfSession{}, fmt.Errorf("all LongLink candidates failed: %w", errors.Join(failures...))
 }
 
-func (p *Pool) loginTarget(ctx context.Context, target Target, loginBuffer, tcpProxy string, fallbackDirect bool) (WmpfSession, error) {
+func (p *Pool) loginTarget(ctx context.Context, target Target, loginBuffer, tcpProxy string, fallbackDirect bool, device DeviceIdentity) (WmpfSession, error) {
 	mc, err := connectMmtls(ctx, target, p.cfg.LoginTimeout, tcpProxy, fallbackDirect)
 	if err != nil {
 		return WmpfSession{}, err
@@ -460,9 +476,11 @@ func (p *Pool) loginTarget(ctx context.Context, target Target, loginBuffer, tcpP
 	if err != nil {
 		return WmpfSession{}, err
 	}
-	appDeviceID, err := randomAppDeviceID()
-	if err != nil {
-		return WmpfSession{}, err
+	appDeviceID := append([]byte(nil), device.AppDeviceID...)
+	if device.empty() {
+		if appDeviceID, err = randomAppDeviceID(); err != nil {
+			return WmpfSession{}, err
+		}
 	}
 	temp := &manualAuthTemp{}
 	body, err := buildLoginBody(loginBuffer, meta.DeviceID, appDeviceID, temp)
@@ -500,7 +518,7 @@ func (p *Pool) loginTarget(ctx context.Context, target Target, loginBuffer, tcpP
 	}
 	return WmpfSession{
 		Session: appSess, AutoAuth: autoAuth, PSK: psk, CreatedAt: time.Now(),
-		TCPProxy: tcpProxy, FallbackDirect: fallbackDirect,
+		TCPProxy: tcpProxy, FallbackDirect: fallbackDirect, Device: device,
 	}, nil
 }
 

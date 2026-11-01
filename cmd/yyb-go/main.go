@@ -122,6 +122,7 @@ func main() {
 		KeepAliveInterval: *keepAliveInterval,
 		KeepAliveAhead:    *keepAliveAhead,
 		ASRefreshMode:     os.Getenv("YYB_APPSTORE_REFRESH_MODE"),
+		DeviceIdentity:    os.Getenv("YYB_DEVICE_IDENTITY"),
 		QingLongType:      panelType,
 		QingLongURL:       panelURL,
 		QingLongClientID:  clientID,
@@ -138,6 +139,14 @@ func main() {
 		AdminPassword:     getEnvWithFallback("YYB_ADMIN_PASSWORD", "YYB_WEB_PASSWORD"),
 		CookieSecure:      os.Getenv("YYB_COOKIE_SECURE") == "true",
 		EnablePCLogin:     strings.EqualFold(strings.TrimSpace(os.Getenv("YYB_ENABLE_PC_LOGIN")), "true"),
+
+		// Accounts with a script push channel are notified there by default.
+		NotifyChannel:            os.Getenv("YYB_NOTIFY_CHANNEL"),
+		NotifyToken:              os.Getenv("YYB_NOTIFY_TOKEN"),
+		NotifyTopic:              os.Getenv("YYB_NOTIFY_TOPIC"),
+		DisableAccountPushNotify: strings.EqualFold(strings.TrimSpace(os.Getenv("YYB_NOTIFY_ACCOUNT_PUSH")), "false"),
+
+		DisableCircuitBreaker: strings.EqualFold(strings.TrimSpace(os.Getenv("YYB_CIRCUIT_BREAKER")), "off"),
 	}
 
 	if *resetAdmin != "" {

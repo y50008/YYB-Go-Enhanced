@@ -42,9 +42,9 @@ func TestPCMgrCachedJSAPIComparison(t *testing.T) {
 			if name == "key_legacy_host" {
 				host = nil
 			}
-			plain, err = buildOperateRequest(st.Session.UIN, appID, map[string]any{"api_name": "webapi_getuserencryptkey", "data": map[string]any{}, "env": 1}, host)
+			plain, err = buildOperateRequest(st.Session.UIN, appID, map[string]any{"api_name": "webapi_getuserencryptkey", "data": map[string]any{}, "env": 1}, host, nil)
 		case "phone_provider":
-			plain = buildPhoneRequest(st.Session.UIN, appID, st.Session.HostAppID)
+			plain = buildPhoneRequest(st.Session.UIN, appID, st.Session.HostAppID, nil)
 		default:
 			plain = buildJSAPIPlaintext(st.Session.UIN, appID, nil, 0, nil, st.Session.HostAppID, nil)
 		}

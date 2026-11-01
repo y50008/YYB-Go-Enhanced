@@ -888,19 +888,24 @@ func (a *App) pushSettingPublic(ctx context.Context, setting *store.AccountPushS
 }
 
 func (a *App) namedEnvHasValue(ctx context.Context, name string) (bool, error) {
+	value, err := a.namedEnvValue(ctx, name)
+	return value != "", err
+}
+
+func (a *App) namedEnvValue(ctx context.Context, name string) (string, error) {
 	if name == "" {
-		return false, nil
+		return "", nil
 	}
 	envs, err := a.qinglong.listEnvs(ctx, name)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	for _, env := range envs {
-		if env.Name == name && strings.TrimSpace(env.Value) != "" {
-			return true, nil
+		if value := strings.TrimSpace(env.Value); env.Name == name && value != "" {
+			return value, nil
 		}
 	}
-	return false, nil
+	return "", nil
 }
 
 func writeRunError(w http.ResponseWriter, err error) {

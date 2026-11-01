@@ -33,6 +33,8 @@ var catalog = map[string]definition{
 	"protocol.failed":            {"protocol", "error", "协议调用失败"},
 	"protocol.recovery_started":  {"protocol", "info", "开始恢复取码会话"},
 	"protocol.recovery_deferred": {"protocol", "debug", "取码恢复处于退避期"},
+	"protocol.circuit_open":      {"protocol", "warn", "已熔断，暂停向上游重复请求"},
+	"protocol.circuit_deferred":  {"protocol", "debug", "请求处于熔断期，未发往上游"},
 	"protocol.ticket_requested":  {"protocol", "info", "请求新的登录票据"},
 	"protocol.recovered":         {"protocol", "info", "新会话取码验证通过"},
 	"protocol.native_started":    {"protocol", "info", "开始独立会话密钥恢复"},
@@ -43,6 +45,8 @@ var catalog = map[string]definition{
 	"keepalive.renewed":          {"keepalive", "info", "后台凭据续期完成"},
 	"account.expired":            {"account", "warn", "账号授权失效，需重新扫码"},
 	"account.scanned":            {"account", "info", "扫码授权已保存"},
+	"account.notified":           {"account", "info", "已推送掉线提醒"},
+	"account.notify_failed":      {"account", "warn", "掉线提醒推送失败"},
 }
 
 type Rejection struct {
@@ -78,7 +82,7 @@ var safeRoute = regexp.MustCompile(`^/[a-zA-Z0-9_/*:-]{0,100}$`)
 
 func safeStage(stage string) bool {
 	switch stage {
-	case "refresh_token", "check_login", "login_buffer", "manual_auth", "native_autoauth_transport", "native_autoauth_application", "native_autoauth_business", "shortlink_transport", "shortlink_application", "pcmgr_login_buffer", "pcmgr_key_renewal":
+	case "refresh_token", "check_login", "login_buffer", "manual_auth", "native_autoauth_transport", "native_autoauth_application", "native_autoauth_business", "shortlink_transport", "shortlink_application", "pcmgr_login_buffer", "pcmgr_key_renewal", "circuit_target", "circuit_session":
 		return true
 	}
 	return false

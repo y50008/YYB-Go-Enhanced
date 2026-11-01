@@ -56,7 +56,7 @@ func TestSavedTicketRebuildAudit(t *testing.T) {
 		"production_db_written": false, "oauth_requested": false, "autoauth_requested": false, "new_ticket_requested": false,
 	}
 	if IsApplicationRequestRejection(cachedErr) {
-		fresh, loginErr := pool.loginAndSession(ctx, saved.Buffer, "", false)
+		fresh, loginErr := pool.loginAndSession(ctx, saved.Buffer, "", false, DeviceIdentity{})
 		if loginErr != nil {
 			report["saved_ticket_manualauth"] = savedTicketAuditResult(nil, loginErr)
 		} else {
