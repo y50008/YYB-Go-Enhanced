@@ -739,6 +739,17 @@ ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated
 	return err
 }
 
+// EnsureSetting stores value only when key is absent and returns the value
+// actually stored, so concurrent first writers agree on one value.
+func (db *DB) EnsureSetting(ctx context.Context, key, value string) (string, error) {
+	if _, err := db.sql.ExecContext(ctx, `
+INSERT INTO app_settings(key, value, updated_at) VALUES(?,?,?)
+ON CONFLICT(key) DO NOTHING`, key, value, time.Now().Unix()); err != nil {
+		return "", err
+	}
+	return db.GetSetting(ctx, key)
+}
+
 func (db *DB) SetAccountCredential(ctx context.Context, id int64, loginBuffer string, credentials map[string]any) error {
 	credJSON, err := marshalNullable(credentials)
 	if err != nil {

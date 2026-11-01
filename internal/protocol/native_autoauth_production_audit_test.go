@@ -58,7 +58,7 @@ func TestNativeAutoAuthProductionAudit(t *testing.T) {
 			}
 			t.Fatal("fresh ticket unavailable; OAuth unchanged")
 		}
-		st, err = pool.loginAndSession(ctx, buffer, "", false)
+		st, err = pool.loginAndSession(ctx, buffer, "", false, DeviceIdentity{})
 		if err != nil {
 			t.Fatal("production ManualAuth baseline failed")
 		}

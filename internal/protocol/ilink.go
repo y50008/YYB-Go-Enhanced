@@ -112,8 +112,7 @@ func randomAppDeviceID() ([]byte, error) {
 func randomSessDevice() []byte {
 	mac := make([]byte, 6)
 	_, _ = rand.Read(mac)
-	mac[0] = (mac[0] | 0x02) & 0xfe
-	return []byte(fmt.Sprintf("%02X-%02X-%02X-%02X-%02X-%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]))
+	return formatSessDevice(mac)
 }
 
 func buildManualAuthRequest(loginBufferB64 string, appDeviceID []byte) ([]byte, error) {
@@ -530,8 +529,10 @@ func parseRawResponse(codeOrJSON, resp []byte) map[string]any {
 	return protobufToMap(resp)
 }
 
-func buildPhoneRequest(uin int64, appID string, hostAppID []byte) []byte {
-	sessDevice := randomSessDevice()
+func buildPhoneRequest(uin int64, appID string, hostAppID, sessDevice []byte) []byte {
+	if len(sessDevice) == 0 {
+		sessDevice = randomSessDevice()
+	}
 	aid := []byte(appID)
 	body := make([]byte, 0, 140)
 	body = append(body, pbLen(1, sessionInfo(uint32(uin), unifiedPCWindows, sessDevice))...)
@@ -549,9 +550,11 @@ func buildPhoneRequest(uin int64, appID string, hostAppID []byte) []byte {
 	return buildJSAPIPlaintext(uin, appID, phoneURL, phoneCmdID, body, hostAppID, sessDevice)
 }
 
-func buildOperateRequest(uin int64, appID string, payload map[string]any, hostAppID []byte) ([]byte, error) {
+func buildOperateRequest(uin int64, appID string, payload map[string]any, hostAppID, sessDevice []byte) ([]byte, error) {
 	payload = extractOperatePayload(payload)
-	sessDevice := randomSessDevice()
+	if len(sessDevice) == 0 {
+		sessDevice = randomSessDevice()
+	}
 	aid := []byte(appID)
 	f3, err := json.Marshal(payload)
 	if err != nil {
