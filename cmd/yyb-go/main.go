@@ -9,11 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"yyb_go/internal/httpapi"
+	"yyb_go/internal/protocol"
 )
 
 func main() {
@@ -147,6 +149,14 @@ func main() {
 		DisableAccountPushNotify: strings.EqualFold(strings.TrimSpace(os.Getenv("YYB_NOTIFY_ACCOUNT_PUSH")), "false"),
 
 		DisableCircuitBreaker: strings.EqualFold(strings.TrimSpace(os.Getenv("YYB_CIRCUIT_BREAKER")), "off"),
+
+		// Upstream requests of one account are spaced by default. The breaker and
+		// the login budget only react to failures and OAuth calls, so a burst of
+		// successful codes would pass both.
+		CodeMinGap:  envDuration("YYB_CODE_MIN_GAP", defaultCodeMinGap),
+		CodeMaxWait: envDuration("YYB_CODE_MAX_WAIT", 20*time.Second),
+		LoginBudget: envInt("YYB_LOGIN_BUDGET", protocol.DefaultLoginBudget),
+		LoginWindow: envDuration("YYB_LOGIN_WINDOW", protocol.DefaultLoginWindow),
 	}
 
 	if *resetAdmin != "" {
@@ -187,6 +197,49 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
+}
+
+// defaultCodeMinGap is the least time between two upstream requests of one
+// account. It is a conservative starting point, not a measured safe rate: the
+// one burst that got an authorization rejected after successful requests alone
+// came in at about 1.6 requests a second.
+const defaultCodeMinGap = 3 * time.Second
+
+// envDuration reads a Go duration such as "2s". "off" and "0" mean zero, which
+// switches the setting off. An empty or unreadable value keeps the default and
+// says so, instead of silently running with a different value.
+func envDuration(key string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	if strings.EqualFold(raw, "off") {
+		return 0
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value < 0 {
+		log.Printf("%s=%q is not a valid duration; using %s", key, raw, fallback)
+		return fallback
+	}
+	return value
+}
+
+// envInt reads a whole number. "off" means zero, which switches the setting
+// off; an unreadable value keeps the default and says so.
+func envInt(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	if strings.EqualFold(raw, "off") {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		log.Printf("%s=%q is not a valid whole number; using %d", key, raw, fallback)
+		return fallback
+	}
+	return value
 }
 
 func getEnvWithFallback(keys ...string) string {

@@ -33,8 +33,11 @@ var catalog = map[string]definition{
 	"protocol.failed":            {"protocol", "error", "协议调用失败"},
 	"protocol.recovery_started":  {"protocol", "info", "开始恢复取码会话"},
 	"protocol.recovery_deferred": {"protocol", "debug", "取码恢复处于退避期"},
+	"protocol.recovery_skipped":  {"protocol", "debug", "取码恢复已跳过：会话刚验证成功"},
 	"protocol.circuit_open":      {"protocol", "warn", "已熔断，暂停向上游重复请求"},
 	"protocol.circuit_deferred":  {"protocol", "debug", "请求处于熔断期，未发往上游"},
+	"protocol.paced":             {"protocol", "info", "取码限速：部分请求已排队或被暂缓"},
+	"protocol.login_limited":     {"protocol", "warn", "重新登录次数已达上限，部分请求未再恢复会话"},
 	"protocol.ticket_requested":  {"protocol", "info", "请求新的登录票据"},
 	"protocol.recovered":         {"protocol", "info", "新会话取码验证通过"},
 	"protocol.native_started":    {"protocol", "info", "开始独立会话密钥恢复"},
@@ -77,6 +80,9 @@ type Fields struct {
 	Source     string      `json:"source,omitempty"`
 	Rejections []Rejection `json:"rejections,omitempty"`
 	Count      uint64      `json:"count,omitempty"`
+	// Waited and Refused summarise a burst that pacing queued or turned away.
+	Waited  uint64 `json:"waited,omitempty"`
+	Refused uint64 `json:"refused,omitempty"`
 }
 
 // Refresh sources outside the background keepalive loop, which reports its own

@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"yyb_go/internal/eventlog"
 	"yyb_go/internal/store"
 )
 
@@ -239,8 +241,17 @@ func TestActiveAccountDoesNotConsumeNativeKeyBeforeSavedTicket(t *testing.T) {
 	}
 }
 
-// A -14 inside the fresh-session window follows a request that just succeeded on
-// the same session, so it is the AppID's own refusal and must not log in again.
+func testSession(send string, proxy string) WmpfSession {
+	return WmpfSession{
+		Session:  AppSession{UIN: 1234, SendKey: []byte(send), RecvKey: []byte("recv-" + send)},
+		PSK:      pskEntry{PSKType: 1, PreSharedKey: "001122", TicketEntry: "aabbcc", ExpiredAt: time.Now().Add(time.Hour).Unix()},
+		TCPProxy: proxy,
+	}
+}
+
+// A -14 shortly after a wx.login returned a code on the session that is cached
+// now is more likely the AppID's own refusal than an expired session, so it must
+// not log in again. The marker belongs to that session and route only.
 func TestFreshSessionSuppressesRecovery(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "yyb.db"))
@@ -260,37 +271,74 @@ func TestFreshSessionSuppressesRecovery(t *testing.T) {
 		probes++
 		return WmpfSession{}, nil, errors.New("synthetic ticket refusal")
 	}
+	cache := func(st WmpfSession) {
+		t.Helper()
+		if err := db.PutSession(ctx, acc.ID, nil, st.toBlob(), st.PSK.ExpiredAt, st.TCPProxy); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recoverFor := func(account *store.WechatAccount, target, proxy string) {
+		t.Helper()
+		_, _ = pool.recoverCodeSession(ctx, account, target, proxy, original, probe)
+	}
 
-	pool.markSessionVerified(acc, acc.ID, "")
+	first := testSession("first", "")
+	cache(first)
+	pool.markSessionVerified(acc, acc.ID, first)
 	for _, target := range []string{"wx-a", "wx-b"} {
 		if _, err := pool.recoverCodeSession(ctx, acc, target, "", original, probe); !errors.Is(err, original) {
 			t.Fatalf("suppressed recovery lost the original -14: %v", err)
 		}
 	}
 	if probes != 0 {
-		t.Fatal("recovery ran on a session that had just succeeded")
+		t.Fatal("recovery ran on a session that had just returned a code")
 	}
 
-	// The verification belongs to one route only.
-	_, _ = pool.recoverCodeSession(ctx, acc, "wx-a", "socks5://example.invalid:1080", original, probe)
+	// A replaced cache is a new session: the earlier success does not cover it.
+	cache(testSession("second", ""))
+	recoverFor(acc, "wx-a", "")
 	if probes != 1 {
-		t.Fatal("verification on one route suppressed recovery on another")
+		t.Fatal("a success on a replaced session suppressed recovery")
+	}
+
+	// The marker belongs to one route: a session on another route is not covered.
+	routed := testSession("routed", "socks5://example.invalid:1080")
+	cache(routed)
+	pool.markSessionVerified(acc, acc.ID, routed)
+	recoverFor(acc, "wx-c", "")
+	if probes != 2 {
+		t.Fatal("a success on another route suppressed recovery")
 	}
 
 	// After the window a -14 may repair the session again.
+	second := testSession("second", "")
+	cache(second)
+	pool.markSessionVerified(acc, acc.ID, second)
 	pool.mu.Lock()
 	key := sessionKey(acc.ID, "")
 	verified := pool.verified[key]
 	verified.At = time.Now().Add(-freshSessionWindow - time.Second)
 	pool.verified[key] = verified
 	pool.mu.Unlock()
-	_, _ = pool.recoverCodeSession(ctx, acc, "wx-b", "", original, probe)
-	if probes != 2 {
+	recoverFor(acc, "wx-b", "")
+	if probes != 3 {
 		t.Fatal("recovery stayed suppressed after the window")
 	}
 
-	// A re-scan is a new authorization; the earlier verification no longer applies.
-	pool.markSessionVerified(acc, acc.ID, "")
+	// An invalidated cache leaves nothing to vouch for: the success no longer counts.
+	cache(second)
+	pool.markSessionVerified(acc, acc.ID, second)
+	if err := db.InvalidateAccountSessions(ctx, acc.ID); err != nil {
+		t.Fatal(err)
+	}
+	recoverFor(acc, "wx-e", "")
+	if probes != 4 {
+		t.Fatal("a success on an invalidated session suppressed recovery")
+	}
+
+	// A re-scan is a new authorization; the earlier success no longer applies.
+	cache(second)
+	pool.markSessionVerified(acc, acc.ID, second)
 	if err := db.SetAccountCredential(ctx, acc.ID, "new-scan-buffer", map[string]any{"accesstoken": "new-scan"}); err != nil {
 		t.Fatal(err)
 	}
@@ -298,8 +346,188 @@ func TestFreshSessionSuppressesRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = pool.recoverCodeSession(ctx, rescanned, "wx-c", "", original, probe)
-	if probes != 3 {
-		t.Fatal("a verification from before the re-scan suppressed recovery")
+	recoverFor(rescanned, "wx-d", "")
+	if probes != 5 {
+		t.Fatal("a success from before the re-scan suppressed recovery")
+	}
+}
+
+// Skipping a recovery because the session was just verified is reported under
+// its own event, apart from the failure cooldown.
+func TestFreshSessionSkipHasItsOwnEvent(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "yyb.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	logger, err := eventlog.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "alive"
+	acc, err := db.UpsertAccount(ctx, "synthetic-skip-account", "saved-buffer", nil, nil, nil, nil, map[string]any{"accesstoken": "synthetic-access"}, &status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := NewPool(DefaultConfig(), db)
+	pool.SetEventLogger(logger)
+	st := testSession("skip", "")
+	if err := db.PutSession(ctx, acc.ID, nil, st.toBlob(), st.PSK.ExpiredAt, ""); err != nil {
+		t.Fatal(err)
+	}
+	pool.markSessionVerified(acc, acc.ID, st)
+	original := &ShortlinkRejectedError{Code: -14}
+	if _, err := pool.recoverCodeSession(ctx, acc, "wx-skip", "", original, func(context.Context) (WmpfSession, map[string]any, error) {
+		t.Fatal("a just-verified session started a recovery")
+		return WmpfSession{}, nil, nil
+	}); !errors.Is(err, original) {
+		t.Fatalf("skipped recovery lost the original -14: %v", err)
+	}
+	logger.Close()
+	entries, err := db.ListSystemLogs(ctx, store.SystemLogFilter{Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var skipped, deferred int
+	for _, entry := range entries {
+		switch entry.Event {
+		case "protocol.recovery_skipped":
+			skipped++
+			if !strings.Contains(string(entry.Details), `"app_id":"wx-skip"`) {
+				t.Fatalf("skip event lacks the AppID: %s", entry.Details)
+			}
+		case "protocol.recovery_deferred":
+			deferred++
+		}
+	}
+	if skipped != 1 || deferred != 0 {
+		t.Fatalf("expected one recovery_skipped and no recovery_deferred, got %d and %d", skipped, deferred)
+	}
+}
+
+// A cancelled request must not register a repair attempt (and its five minute
+// backoff) that it can never run.
+func TestCancelledRecoveryDoesNotRegisterAnAttempt(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "yyb.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	status := "alive"
+	acc, err := db.UpsertAccount(context.Background(), "synthetic-cancel-account", "saved-buffer", nil, nil, nil, nil, map[string]any{"accesstoken": "synthetic-access"}, &status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := NewPool(DefaultConfig(), db)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	original := &ShortlinkRejectedError{Code: -14}
+	_, err = pool.recoverCodeSession(ctx, acc, "wx-cancel", "", original, func(context.Context) (WmpfSession, map[string]any, error) {
+		t.Fatal("a probe ran on a cancelled context")
+		return WmpfSession{}, nil, nil
+	})
+	var repair *CodeSessionRecoveryError
+	if !errors.As(err, &repair) || !errors.Is(err, original) {
+		t.Fatalf("a cancelled recovery lost the original -14 or its type: %v", err)
+	}
+	pool.mu.Lock()
+	registered := len(pool.codeRepairs)
+	pool.mu.Unlock()
+	if registered != 0 {
+		t.Fatalf("a cancelled recovery registered %d repair attempts", registered)
+	}
+}
+
+// A request cancelled between the session lookup and the registration of its
+// repair attempt must not leave a five minute backoff behind. The hook cancels
+// at exactly that point, so removing the re-check inside the critical section
+// makes this test fail.
+func TestRecoveryCancelledWhileRegisteringLeavesNoBackoff(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "yyb.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	status := "alive"
+	acc, err := db.UpsertAccount(context.Background(), "synthetic-late-cancel", "saved-buffer", nil, nil, nil, nil, map[string]any{"accesstoken": "synthetic-access"}, &status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := NewPool(DefaultConfig(), db)
+	ctx, cancel := context.WithCancel(context.Background())
+	repairRegistrationHook = cancel
+	t.Cleanup(func() { repairRegistrationHook = nil })
+	original := &ShortlinkRejectedError{Code: -14}
+	probed := false
+	_, err = pool.recoverCodeSession(ctx, acc, "wx-late", "", original, func(context.Context) (WmpfSession, map[string]any, error) {
+		probed = true
+		return WmpfSession{}, nil, errors.New("synthetic probe failure")
+	})
+	var repair *CodeSessionRecoveryError
+	if !errors.As(err, &repair) || !errors.Is(err, original) {
+		t.Fatalf("a request cancelled while registering lost the original -14 or its type: %v", err)
+	}
+	if probed {
+		t.Fatal("a cancelled request still ran the probe")
+	}
+	pool.mu.Lock()
+	registered := len(pool.codeRepairs)
+	pool.mu.Unlock()
+	if registered != 0 {
+		t.Fatalf("a request cancelled while registering left %d backoff entries", registered)
+	}
+	repairRegistrationHook = nil
+	if _, err := pool.recoverCodeSession(context.Background(), acc, "wx-late", "", original, func(context.Context) (WmpfSession, map[string]any, error) {
+		probed = true
+		return WmpfSession{}, nil, errors.New("synthetic probe failure")
+	}); err == nil || !probed {
+		t.Fatalf("the next normal request must still be allowed to try: probed=%v err=%v", probed, err)
+	}
+}
+
+// The session identity digest changes when any of its four parts changes, is
+// stable for the same material, and does not confuse different splits.
+func TestSessionFingerprintCoversEveryPartAndSplit(t *testing.T) {
+	base := testSession("alpha", "")
+	same := testSession("alpha", "")
+	if sessionFingerprint(base) != sessionFingerprint(same) {
+		t.Fatal("identical material produced different digests")
+	}
+	changed := []func(*WmpfSession){
+		func(s *WmpfSession) { s.Session.SendKey = []byte("other") },
+		func(s *WmpfSession) { s.Session.RecvKey = []byte("other") },
+		func(s *WmpfSession) { s.PSK.PreSharedKey = "ffff" },
+		func(s *WmpfSession) { s.PSK.TicketEntry = "ffff" },
+	}
+	for i, mutate := range changed {
+		other := testSession("alpha", "")
+		mutate(&other)
+		if sessionFingerprint(other) == sessionFingerprint(base) {
+			t.Fatalf("changing part %d did not change the digest", i)
+		}
+	}
+	left := testSession("alpha", "")
+	left.Session.SendKey, left.Session.RecvKey = []byte("ab"), []byte("c")
+	right := testSession("alpha", "")
+	right.Session.SendKey, right.Session.RecvKey = []byte("a"), []byte("bc")
+	if sessionFingerprint(left) == sessionFingerprint(right) {
+		t.Fatal("different splits of the same bytes collided")
+	}
+	// A database round trip (JSON out and back in) must not change it.
+	raw, err := json.Marshal(base.toBlob())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored map[string]any
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatal(err)
+	}
+	round, err := sessionFromBlob(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessionFingerprint(round) != sessionFingerprint(base) {
+		t.Fatal("the digest changed across a persistence round trip")
 	}
 }

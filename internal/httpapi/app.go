@@ -78,6 +78,19 @@ type Config struct {
 	// DisableCircuitBreaker turns off the local target/session hold-off that
 	// stops repeating an upstream-rejected request.
 	DisableCircuitBreaker bool
+
+	// CodeMinGap spaces the upstream requests of one account; zero turns
+	// pacing off. CodeMaxWait is the longest a request queues for its slot
+	// before it is refused locally. tuning.json beside the database overrides
+	// both without a restart.
+	CodeMinGap  time.Duration
+	CodeMaxWait time.Duration
+
+	// LoginBudget caps the OAuth-layer calls (new login tickets, forced
+	// refreshes) that business traffic may cause per account inside
+	// LoginWindow; zero disables it. tuning.json overrides both at run time.
+	LoginBudget int
+	LoginWindow time.Duration
 }
 
 type App struct {
@@ -97,6 +110,7 @@ type App struct {
 	auth               *auth.Store
 	notifier           *offlineNotifier
 	circuit            *circuitBreaker
+	pacer              *accountPacer
 
 	mu                sync.Mutex
 	qrSessions        map[string]*qrLoginSession
@@ -222,8 +236,14 @@ func NewApp(cfg Config) (*App, error) {
 	poolCfg.SessionTTL = cfg.SessionTTL
 	poolCfg.ShortlinkTimeout = cfg.RequestTimeout
 	poolCfg.DeviceIdentity = cfg.DeviceIdentity
+	// Zero disables the login budget, so a Config that does not set it (tests,
+	// embedders) keeps the previous behaviour; main supplies the defaults.
+	poolCfg.LoginBudget = cfg.LoginBudget
+	poolCfg.LoginWindow = cfg.LoginWindow
 	pool := protocol.NewPool(poolCfg, db)
 	qrClient := qr.NewClient(cfg.RequestTimeout)
+	// The traffic limiter's configured values; tuning.json may override them at run time.
+	trafficSettings := pacingSettings{MinGap: cfg.CodeMinGap, MaxWait: cfg.CodeMaxWait, LoginBudget: cfg.LoginBudget, LoginWindow: cfg.LoginWindow}
 	app := &App{
 		updates:            newUpdateChecker(cfg.UpdateProxy, cfg.UpdateVersionURL),
 		cfg:                cfg,
@@ -239,6 +259,7 @@ func NewApp(cfg Config) (*App, error) {
 		qinglong:           newQingLongClient(cfg.QingLongType, cfg.QingLongURL, cfg.QingLongClientID, cfg.QingLongSecret, cfg.RequestTimeout),
 		notifier:           newOfflineNotifier(offlineNotifyTimeout),
 		circuit:            newCircuitBreaker(circuitConfigFor(cfg.DisableCircuitBreaker)),
+		pacer:              newAccountPacer(filepath.Join(res.DB, "tuning.json"), trafficSettings),
 		qrSessions:         map[string]*qrLoginSession{},
 		quickSessions:      map[string]quickLoginSession{},
 		loginAttempts:      map[string]loginAttempt{},
@@ -247,6 +268,8 @@ func NewApp(cfg Config) (*App, error) {
 		proxyLeaseLocks:    map[int64]chan struct{}{},
 		keepAliveRetryAt:   map[int64]time.Time{},
 	}
+	// tuning.json changes the login budget of the running pool without a restart.
+	app.pacer.onChange = func(s pacingSettings) { pool.SetLoginBudget(s.LoginBudget, s.LoginWindow) }
 	authDriver, authDSN, err := cfg.AuthDatabase()
 	if err != nil {
 		_ = db.Close()
@@ -1340,6 +1363,11 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 		var open *circuitOpenError
 		switch {
 		case errors.As(errOut, &open):
+			if open.Scope == "pacing" {
+				// A burst can refuse hundreds of requests a minute; paceWXApp
+				// reports it as one summary event instead of filling the log.
+				return
+			}
 			// A locally short-circuited request never reached the upstream.
 			event = "protocol.circuit_deferred"
 		case errOut != nil:
@@ -1358,6 +1386,12 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 	}
 	if breakerErr := a.circuit.check(acc.ID, appID, op); breakerErr != nil {
 		return nil, breakerErr
+	}
+	// Held-off requests above never take a slot. Everything that reaches the
+	// upstream is spaced per account, so a burst of scripts cannot turn into a
+	// burst of logins on one authorization.
+	if paceErr := a.paceWXApp(ctx, acc); paceErr != nil {
+		return nil, paceErr
 	}
 	proxyValue, fallbackDirect, err := a.resolveWXAppProxy(ctx, acc.ID)
 	if err != nil {
@@ -1408,6 +1442,9 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 		// The access token may still be usable: fetch a fresh buffer without
 		// rotating tokens or changing scan/expiry timestamps. Pool persists the
 		// replacement protocol session, so no account credential write is needed.
+		if !a.pool.AllowLogin(acc.ID) {
+			return nil, errors.Join(callErr, errLoginBudget)
+		}
 		buffer, bufferErr := a.fetchAccountLoginBuffer(ctx, acc)
 		if bufferErr == nil {
 			fresh := *acc
@@ -1429,6 +1466,12 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 		if ctx.Err() != nil || errors.Is(bufferErr, context.Canceled) || errors.Is(bufferErr, context.DeadlineExceeded) || errors.As(bufferErr, &networkErr) || errors.Is(bufferErr, io.EOF) || errors.Is(bufferErr, io.ErrUnexpectedEOF) {
 			return nil, callErr
 		}
+	}
+	// A forced refresh is another OAuth-layer call. Past the account's login
+	// budget the request fails with the error it has, and the cached session is
+	// left alone rather than invalidated for a repair that will not happen.
+	if !a.pool.AllowLogin(acc.ID) {
+		return nil, errors.Join(callErr, errLoginBudget)
 	}
 	if !ticketAccessRejected {
 		_ = a.db.InvalidateSessionForAccount(ctx, acc, proxyValue)

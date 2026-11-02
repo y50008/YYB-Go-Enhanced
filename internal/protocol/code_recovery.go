@@ -2,6 +2,9 @@ package protocol
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -35,11 +38,31 @@ type codeRepairAttempt struct {
 // upstream may count against the authorization.
 const freshSessionWindow = 2 * time.Minute
 
-// verifiedSession records the last request that succeeded on an account's
-// session for one route.
+// repairRegistrationHook runs just before a repair attempt is registered. Tests
+// use it to cancel a request at exactly that point.
+var repairRegistrationHook func()
+
+// verifiedSession records the last wx.login that succeeded on an account's
+// session for one route. Fingerprint identifies that very session, so a cache
+// that was invalidated or replaced afterwards no longer counts as verified.
 type verifiedSession struct {
-	Account *store.WechatAccount
-	At      time.Time
+	Account     *store.WechatAccount
+	At          time.Time
+	Fingerprint string
+}
+
+// sessionFingerprint identifies a session by a full SHA-256 over its key
+// material and PSK entry, each part length-prefixed so different splits cannot
+// collide. Only the digest is kept, never the keys.
+func sessionFingerprint(st WmpfSession) string {
+	h := sha256.New()
+	for _, part := range [][]byte{st.Session.SendKey, st.Session.RecvKey, []byte(st.PSK.PreSharedKey), []byte(st.PSK.TicketEntry)} {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(part)))
+		h.Write(n[:])
+		h.Write(part)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func sessionKey(accountID int64, proxy string) string {
@@ -53,9 +76,11 @@ func firstAccount(expected []*store.WechatAccount) *store.WechatAccount {
 	return expected[0]
 }
 
-// markSessionVerified is called after a request succeeded. acc may be nil when
-// the caller did not pass the authorization snapshot.
-func (p *Pool) markSessionVerified(acc *store.WechatAccount, accountID int64, proxy string) {
+// markSessionVerified is called after a wx.login returned a code on st. acc may
+// be nil when the caller did not pass the authorization snapshot; the route is
+// the cache route key carried by st, which differs from the configured one after a direct
+// fallback.
+func (p *Pool) markSessionVerified(acc *store.WechatAccount, accountID int64, st WmpfSession) {
 	now := time.Now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -64,19 +89,25 @@ func (p *Pool) markSessionVerified(acc *store.WechatAccount, accountID int64, pr
 			delete(p.verified, k)
 		}
 	}
-	p.verified[sessionKey(accountID, proxy)] = verifiedSession{Account: acc, At: now}
+	p.verified[sessionKey(accountID, st.TCPProxy)] = verifiedSession{Account: acc, At: now, Fingerprint: sessionFingerprint(st)}
 }
 
-// sessionRecentlyVerified reports whether a request succeeded on this account's
-// session for this route within freshSessionWindow under the same authorization.
-func (p *Pool) sessionRecentlyVerified(current *store.WechatAccount, proxy string) bool {
+// sessionRecentlyVerified reports whether a wx.login succeeded within
+// freshSessionWindow on the session that is cached for this account and route
+// now, under the same authorization. A replaced or invalidated cache never
+// matches, so a new session is not covered by an old success.
+func (p *Pool) sessionRecentlyVerified(ctx context.Context, current *store.WechatAccount, proxy string) bool {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	v, ok := p.verified[sessionKey(current.ID, proxy)]
+	p.mu.Unlock()
 	if !ok || time.Since(v.At) >= freshSessionWindow {
 		return false
 	}
-	return v.Account == nil || v.Account.SameAuthorization(current)
+	if v.Account != nil && !v.Account.SameAuthorization(current) {
+		return false
+	}
+	cached, err := p.cachedSession(ctx, current.ID, proxy)
+	return err == nil && sessionFingerprint(cached) == v.Fingerprint
 }
 
 func (p *Pool) requestLoginCode(ctx context.Context, st WmpfSession, appID string) (map[string]any, error) {
@@ -190,21 +221,46 @@ func (p *Pool) recoverCodeSession(ctx context.Context, acc *store.WechatAccount,
 	if current.SessionOnly() && !p.hasNativeRecovery(ctx, current.ID, proxy) || current.Status != nil && *current.Status == "expired" {
 		return nil, original
 	}
-	if p.sessionRecentlyVerified(current, proxy) {
-		// A request just succeeded on this very session, so this -14 belongs to
-		// the AppID alone. Another ManualAuth and ticket would only add logins.
-		p.events.Emit("protocol.recovery_deferred", eventlog.ForAccount(current).WithTarget(appID, eventlog.OpGetCode, ""))
+	verified := p.sessionRecentlyVerified(ctx, current, proxy)
+	if err := ctx.Err(); err != nil {
+		// A cancelled request must not register a repair attempt, and its
+		// backoff, that it can never run. This also covers a cancellation that
+		// made the session lookup above fail.
+		return fail(err)
+	}
+	if verified {
+		// A wx.login just returned a code on this very session, so this -14 is
+		// more likely the AppID's own refusal than an expired session. Another
+		// ManualAuth and ticket would only add logins.
+		p.events.Emit("protocol.recovery_skipped", eventlog.ForAccount(current).WithTarget(appID, eventlog.OpGetCode, ""))
 		return nil, original
 	}
 	key := fmt.Sprintf("%d\x00%s\x00%s", acc.ID, proxy, appID)
+	if hook := repairRegistrationHook; hook != nil {
+		hook()
+	}
 	p.mu.Lock()
 	for k, attempt := range p.codeRepairs {
 		if time.Since(attempt.At) >= 5*time.Minute {
 			delete(p.codeRepairs, k)
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		// Re-check inside the critical section: a request cancelled while it
+		// waited for the lock must not leave a five minute backoff behind.
+		p.mu.Unlock()
+		return fail(err)
+	}
 	previous, found := p.codeRepairs[key]
 	allowed := !found || !previous.Account.SameAuthorization(current) || time.Since(previous.At) >= 5*time.Minute
+	if allowed && !p.AllowLogin(current.ID) {
+		// The account has used its login budget. Keep the original error and
+		// start no backoff for this AppID: once the window has moved on, a later
+		// request may still repair it. The refusal is counted in the budget's own
+		// summary event, so a burst does not add a log row per request.
+		p.mu.Unlock()
+		return nil, original
+	}
 	if allowed {
 		p.codeRepairs[key] = codeRepairAttempt{Account: current, At: time.Now()}
 	}
@@ -240,7 +296,7 @@ func (p *Pool) recoverCodeSession(ctx context.Context, acc *store.WechatAccount,
 		}
 	}
 	p.events.Emit("protocol.recovered", eventlog.ForAccount(current).WithTarget(appID, eventlog.OpGetCode, ""))
-	p.markSessionVerified(current, current.ID, proxy)
+	p.markSessionVerified(current, current.ID, st)
 	p.mu.Lock()
 	delete(p.codeRepairs, key)
 	p.mu.Unlock()

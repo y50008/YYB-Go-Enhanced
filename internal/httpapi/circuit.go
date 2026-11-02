@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"sync"
@@ -97,6 +98,9 @@ type circuitOpenError struct {
 }
 
 func (e *circuitOpenError) Error() string {
+	if e.Scope == "pacing" {
+		return fmt.Sprintf("该账号的请求过于密集，已排满，%ds 后再试；避免短时间内大量请求触发风控", int(e.RetryAfter.Seconds()+0.999))
+	}
 	scope := "目标"
 	if e.Scope == "session" {
 		scope = "账号会话"
@@ -136,6 +140,8 @@ type circuitBreaker struct {
 	mu       sync.Mutex
 	targets  map[targetKey]*targetBreaker
 	sessions map[int64]*sessionBreaker
+	// overflowLogged rate-limits the saturation warning.
+	overflowLogged time.Time
 }
 
 func newCircuitBreaker(cfg circuitConfig) *circuitBreaker {
@@ -244,9 +250,31 @@ func (c *circuitBreaker) targetLocked(key targetKey, now time.Time) *targetBreak
 				delete(c.targets, k)
 			}
 		}
-		if len(c.targets) >= maxBreakerTargets {
+	}
+	if len(c.targets) >= maxBreakerTargets {
+		// Still full of recent targets: make room for the new one by dropping the
+		// least recently active target that is not currently holding requests
+		// off, so a new target is never silently left unprotected.
+		var oldestKey targetKey
+		var oldest time.Time
+		found := false
+		for k, t := range c.targets {
+			if !now.Before(t.openUntil) && (!found || t.last.Before(oldest)) {
+				oldestKey, oldest, found = k, t.last, true
+			}
+		}
+		if !found {
+			// Every slot is holding requests off, which needs thousands of distinct
+			// refused targets within one cooldown. New targets pass untracked (the
+			// breaker is best effort and must not block healthy traffic), but the
+			// saturation is reported instead of staying silent.
+			if now.Sub(c.overflowLogged) >= time.Minute {
+				c.overflowLogged = now
+				log.Printf("protocol: code breaker table is full of open targets (%d); new targets are not tracked", maxBreakerTargets)
+			}
 			return nil
 		}
+		delete(c.targets, oldestKey)
 	}
 	t := &targetBreaker{}
 	c.targets[key] = t
