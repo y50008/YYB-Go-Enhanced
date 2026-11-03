@@ -91,6 +91,19 @@ type Config struct {
 	// LoginWindow; zero disables it. tuning.json overrides both at run time.
 	LoginBudget int
 	LoginWindow time.Duration
+
+	// FreshSessionWindow is how long after a successful code a -14 is treated as
+	// the AppID's own refusal and not repaired with a new login. Zero keeps the
+	// default (protocol.DefaultFreshSessionWindow), so a Config that does not
+	// set it behaves as before; a negative value switches the guard off.
+	// tuning.json overrides it at run time.
+	FreshSessionWindow time.Duration
+
+	// CodeDenyAppIDs adds AppIDs that code requests refuse on top of the
+	// built-in website-application AppIDs; CodeAllowAppIDs lifts a refusal and
+	// wins over both lists.
+	CodeDenyAppIDs  []string
+	CodeAllowAppIDs []string
 }
 
 type App struct {
@@ -110,6 +123,7 @@ type App struct {
 	auth               *auth.Store
 	notifier           *offlineNotifier
 	circuit            *circuitBreaker
+	appIDs             *appIDPolicy
 	pacer              *accountPacer
 
 	mu                sync.Mutex
@@ -240,10 +254,11 @@ func NewApp(cfg Config) (*App, error) {
 	// embedders) keeps the previous behaviour; main supplies the defaults.
 	poolCfg.LoginBudget = cfg.LoginBudget
 	poolCfg.LoginWindow = cfg.LoginWindow
+	poolCfg.FreshSessionWindow = cfg.FreshSessionWindow
 	pool := protocol.NewPool(poolCfg, db)
 	qrClient := qr.NewClient(cfg.RequestTimeout)
 	// The traffic limiter's configured values; tuning.json may override them at run time.
-	trafficSettings := pacingSettings{MinGap: cfg.CodeMinGap, MaxWait: cfg.CodeMaxWait, LoginBudget: cfg.LoginBudget, LoginWindow: cfg.LoginWindow}
+	trafficSettings := pacingSettings{MinGap: cfg.CodeMinGap, MaxWait: cfg.CodeMaxWait, LoginBudget: cfg.LoginBudget, LoginWindow: cfg.LoginWindow, FreshWindow: protocol.EffectiveFreshWindow(cfg.FreshSessionWindow)}
 	app := &App{
 		updates:            newUpdateChecker(cfg.UpdateProxy, cfg.UpdateVersionURL),
 		cfg:                cfg,
@@ -259,6 +274,7 @@ func NewApp(cfg Config) (*App, error) {
 		qinglong:           newQingLongClient(cfg.QingLongType, cfg.QingLongURL, cfg.QingLongClientID, cfg.QingLongSecret, cfg.RequestTimeout),
 		notifier:           newOfflineNotifier(offlineNotifyTimeout),
 		circuit:            newCircuitBreaker(circuitConfigFor(cfg.DisableCircuitBreaker)),
+		appIDs:             newAppIDPolicy(cfg.CodeDenyAppIDs, cfg.CodeAllowAppIDs),
 		pacer:              newAccountPacer(filepath.Join(res.DB, "tuning.json"), trafficSettings),
 		qrSessions:         map[string]*qrLoginSession{},
 		quickSessions:      map[string]quickLoginSession{},
@@ -268,8 +284,12 @@ func NewApp(cfg Config) (*App, error) {
 		proxyLeaseLocks:    map[int64]chan struct{}{},
 		keepAliveRetryAt:   map[int64]time.Time{},
 	}
-	// tuning.json changes the login budget of the running pool without a restart.
-	app.pacer.onChange = func(s pacingSettings) { pool.SetLoginBudget(s.LoginBudget, s.LoginWindow) }
+	// tuning.json changes the login budget and the fresh-session guard of the
+	// running pool without a restart.
+	app.pacer.onChange = func(s pacingSettings) {
+		pool.SetLoginBudget(s.LoginBudget, s.LoginWindow)
+		pool.SetFreshSessionWindow(s.FreshWindow)
+	}
 	authDriver, authDSN, err := cfg.AuthDatabase()
 	if err != nil {
 		_ = db.Close()
@@ -1106,6 +1126,7 @@ func (a *App) callWXApp(w http.ResponseWriter, r *http.Request, requirePayload b
 		case errors.As(err, &expired):
 			writeAccountExpired(w, expired)
 		case writeIfCircuitOpen(w, err):
+		case writeIfAppIDDenied(w, err):
 		default:
 			writeProtocolCallError(w, err)
 		}
@@ -1361,6 +1382,7 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 		fields.Rejections = eventRejections(errOut)
 		event := "protocol.succeeded"
 		var open *circuitOpenError
+		var denied *appIDDeniedError
 		switch {
 		case errors.As(errOut, &open):
 			if open.Scope == "pacing" {
@@ -1370,11 +1392,20 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 			}
 			// A locally short-circuited request never reached the upstream.
 			event = "protocol.circuit_deferred"
+		case errors.As(errOut, &denied):
+			event = "protocol.appid_denied"
 		case errOut != nil:
 			event = "protocol.failed"
 		}
 		a.events.Emit(event, fields)
 	}()
+	// A website-application AppID never gets a code and costs the account its
+	// authorization, so it is refused before anything else looks at the request.
+	if op == eventlog.OpGetCode {
+		if denied := a.appIDs.check(appID); denied != nil {
+			return nil, denied
+		}
+	}
 	// Bound queueing, protocol login and any credential recovery together.
 	ctx, cancel := context.WithTimeout(ctx, a.cfg.RequestTimeout+35*time.Second)
 	defer cancel()
