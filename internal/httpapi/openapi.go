@@ -64,7 +64,7 @@ func newOpenAPISpec() map[string]any {
 				"put": openAPIOperation([]string{"qr"}, "设置默认扫码渠道", nil,
 					jsonRequestBody(objectSchema([]string{"scope", "product"}, map[string]any{
 						"scope":   map[string]any{"type": "string", "enum": []string{"personal", "global"}},
-						"product": map[string]any{"type": "string", "enum": []string{"", "appstore", "pcmgr"}, "description": "个人空值表示跟随系统；global 仅管理员可修改。"},
+						"product": map[string]any{"type": "string", "enum": []string{"", "appstore", "pcmgr", "gameassist"}, "description": "个人空值表示跟随系统；global 仅管理员可修改。"},
 					})), defaulted(map[string]any{"200": jsonResponse("保存后的设置。", freeFormObjectSchema("生效渠道及管理权限。"))})),
 			},
 			"/qr": map[string]any{
@@ -171,7 +171,7 @@ func newOpenAPISpec() map[string]any {
 					[]string{"account-links"},
 					"为一次性授权链接创建二维码",
 					[]map[string]any{pathStringParam("token", "随机不可逆 bearer token。")},
-					jsonOptionalRequestBody(objectSchema(nil, map[string]any{"product": map[string]any{"type": "string", "enum": []string{"appstore", "pcmgr"}, "description": "更新链接锁定原渠道；新增链接可切换。"}})),
+					jsonOptionalRequestBody(objectSchema(nil, map[string]any{"product": map[string]any{"type": "string", "enum": []string{"appstore", "pcmgr", "gameassist"}, "description": "更新链接锁定原渠道；新增链接可切换。"}})),
 					defaulted(map[string]any{"200": jsonResponse("二维码会话。", refSchema("QRCreateResponse"))}),
 				),
 			},
@@ -456,6 +456,34 @@ func newOpenAPISpec() map[string]any {
 					}),
 				),
 			},
+			"/wx/h5code": map[string]any{
+				"post": openAPIOperation(
+					[]string{"wxapp"},
+					"获取公众号网页授权 code（H5 OAuth 自动确认）",
+					nil,
+					jsonRequestBody(map[string]any{
+						"type":     "object",
+						"required": []string{"ref", "app_id"},
+						"properties": map[string]any{
+							"ref":    map[string]any{"type": "string", "description": "账号引用：数字 ID 或 @OpenID"},
+							"app_id": map[string]any{"type": "string", "description": "公众号 AppID"},
+							"payload": map[string]any{
+								"type":     "object",
+								"required": []string{"redirect_uri"},
+								"properties": map[string]any{
+									"redirect_uri": map[string]any{"type": "string", "description": "授权后微信回跳的业务地址，code 附加在它的 query 上"},
+									"scope":        map[string]any{"type": "string", "enum": []string{"snsapi_base", "snsapi_userinfo"}, "description": "默认 snsapi_base"},
+									"state":        map[string]any{"type": "string", "description": "可选；缺省自动生成并在响应中返回"},
+								},
+							},
+						},
+					}),
+					defaulted(map[string]any{
+						"200": jsonResponse("网页授权 code（回调地址与 state 严格校验后返回 result.code）。", refSchema("WxappResponse")),
+					}),
+				),
+			},
+			"/wxapp/getH5Code": wxAliasOperation("获取公众号网页授权 code（H5 OAuth 自动确认；/wx/h5code 兼容入口）", "WxappRequest", "WxappResponse"),
 			"/wx/qrcodeauth/{session_id}/image": map[string]any{
 				"get": openAPIOperation([]string{"qr"}, "获取兼容二维码图片", []map[string]any{pathStringParam("session_id", "二维码会话 ID。")}, nil,
 					defaulted(map[string]any{"200": imageResponse("二维码图片。")})),
@@ -514,7 +542,7 @@ func newOpenAPISpec() map[string]any {
 					"ok": map[string]any{"type": "boolean"},
 				}),
 				"QRCreateResponse": objectSchema([]string{"session_id", "status", "image_url"}, map[string]any{
-					"product":      map[string]any{"type": "string", "enum": []string{"appstore", "pcmgr"}},
+					"product":      map[string]any{"type": "string", "enum": []string{"appstore", "pcmgr", "gameassist"}},
 					"session_id":   map[string]any{"type": "string"},
 					"status":       map[string]any{"type": "string", "example": "pending"},
 					"image_url":    map[string]any{"type": "string", "example": "/qr/{session_id}/image"},
@@ -541,7 +569,7 @@ func newOpenAPISpec() map[string]any {
 					"redirect_url": map[string]any{"type": "string", "format": "uri"},
 				}),
 				"AccountPublic": objectSchema([]string{"id", "openid", "created_at", "updated_at"}, map[string]any{
-					"scan_product":              map[string]any{"type": "string", "enum": []string{"appstore", "pcmgr"}, "description": "账号原扫码渠道。"},
+					"scan_product":              map[string]any{"type": "string", "enum": []string{"appstore", "pcmgr", "gameassist"}, "description": "账号原扫码渠道。"},
 					"id":                        int64Schema(),
 					"openid":                    map[string]any{"type": "string"},
 					"uin":                       nullableInt64Schema(),
@@ -587,7 +615,7 @@ func newOpenAPISpec() map[string]any {
 				}),
 				"ProxySpec": objectSchema(nil, map[string]any{
 					"protocol_proxy_mode":   map[string]any{"type": "string", "enum": []string{"account", "direct"}, "description": "新账号小程序调用出口，默认跟随账号连接模式；已有账号重扫保留原设置。"},
-					"product":               map[string]any{"type": "string", "enum": []string{"appstore", "pcmgr"}, "description": "扫码渠道；省略时使用个人或系统默认。"},
+					"product":               map[string]any{"type": "string", "enum": []string{"appstore", "pcmgr", "gameassist"}, "description": "扫码渠道；省略时使用个人或系统默认。"},
 					"mode":                  map[string]any{"type": "string", "enum": []string{"direct", "static", "api"}, "default": "direct"},
 					"proxy_type":            map[string]any{"type": "string", "enum": []string{"http", "socks5"}, "default": "http", "description": "http 使用 HTTP CONNECT。"},
 					"static_proxy":          map[string]any{"type": "string", "example": "user:pass@127.0.0.1:8080"},

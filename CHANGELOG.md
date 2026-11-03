@@ -2,6 +2,25 @@
 
 本项目按实际提交时间记录主要功能变化，便于部署后确认版本内容。
 
+## v0.2.68 - 2026-11-04
+
+- **新增腾讯手游助手（GameAssist）扫码渠道 `gameassist`：** 第三条客户端凭据链。逆向实证（详见[手游助手渠道接入复核](docs/gameassist-protocol-20261104.md)）：手游助手 6.10 是应用宝 Androws 源码树改版，WMPF host_appid 同为 `wxd44977328b36e647`、ilink 取码栈同构，差异只在凭据签发——OAuth appid `wxef99873dbfab493c`、回调 `yybadaccess.3g.qq.com/syzslogin/syzs_oauth` 换取 `{openId, accessToken "1_…", refreshToken}`（camelCase 信封，同网关同结构已由探测证实），之后复用与 appstore 完全相同的 `pcyyb_get_wx_login_buffer_auth` 换 login_buffer。新包 `internal/gameassist` 兼容 camelCase/snake_case/cookie 三种签发形态并校验 `snsapi_runtime_pcsdk` scope；`product=gameassist` 贯通扫码、面板、OpenAPI 枚举、事件渠道、离线通知与账号渠道展示。刷新走默认 `pc_yyb` 主路由（`-109` 自动转 check-login），初扫约 30 天窗口、首次刷新后收敛为网关 `expires_in`。
+- **渠道大一统补齐（脚本零改动）：** 青龙脚本本就渠道无关（`ref@appserver → /wx/code`，渠道由服务端按账号凭据自动路由；生产 13 个账号全是 appstore、pcmgr/gameassist 尚未在生产接入）。本次把审计出的边缘差异全部抹平：`/integration/accounts` 每条增加 `scan_product`（脚本可按渠道统计分流）；`protocol.login_limited` 限流事件按账号真实渠道打标（此前硬编码 `yyb`，新增 `eventlog.ChannelFor`）；`/wx/getuserinfo` 补齐与 `/wx/code` 一致的过期拦截（unknown 状态且缓存已过期的账号不再先打上游再 502）；gameassist 凭据在 pc_yyb 用户信息端点被拒时降级返回本地资料（与 pcmgr 行为对齐，appstore 保持原样）；`unsupported credential provider` 错误带出实际 provider 值。主链路 `/wx/code`、`/wx/h5code`、手机号、operateWxData、cloud、encryptkey 三渠道行为在代码层完全一致（2026-11-04 审计：身份取自 buffer 字段 3，gameassist 必然落入 yyb 分支，pcmgr 票据有字段 3 强校验反向保护）。
+- **已知边界（如实告知）：** `syzs_oauth` 成功响应形态与 `pcyyb_get_wx_login_buffer_auth` 对 syzs 票据的接受度依赖实机扫码验证——静态证据支持可行，若被拒按文档后备路径（GameAssistant.exe 的 syzs Ual 头族 / launch_param 路线）迭代；`/wx/h5code` 等公众号类接口对 pcmgr/gameassist 会话尚未真机回归。
+
+## v0.2.67 - 2026-11-04
+
+- **修复 `YYB_CODE_ALLOW_APPIDS` 未覆盖动态黑名单的缺陷：** v0.2.66 里放行名单只作用于内置黑名单，动态学习的禁用不受它影响。现在启动时会直接从持久化的动态名单里移除被放行的 AppID（并清除其计数），文档承诺的"放行优先级最高"生效。
+- **动态自学习黑名单改为跨账号确认（v0.2.66 引入、v0.2.67 修正）：** 11-04 00:21–00:28，一个遍历全部账号的脚本让账号 1 在 80 秒内连续成功 17 个 code 后进入上游整体拒绝模式，随后每个 AppID 的取码都"无 code"，v0.2.66 的"1 次即禁"把 62 个 AppID 全部禁用，其中 11 个是几分钟前还在其他账号上成功取码的健康小程序（事件日志可查：`wx141bfb9b73c970a9` 在账号 1 失败的同一时间窗里在账号 9 上成功 2 次）。现在同一 AppID 需要 **2 个不同账号**都拿不到 code（或累计 4 次，覆盖单账号部署）才禁用，任一账号成功即清零计数；`YYB_CODE_DYNAMIC_DENY_THRESHOLD` 的含义相应改为"几个不同账号"，默认 `2`。真死的 AppID 在所有账号上都拿不到 code，仍会被禁。已有部署升级后，此前误禁的 AppID 可用 `POST /api/appid-deny`（不带参数清空全部）或放行名单恢复。
+- **同型的账号死亡仍未解决：** 账号 1 在上述窗口后被按需恢复以 `refresh_token -109 + check_login -109/42007` 拒绝，转为 `session_only`（与 11-03 00:44 同型，该账号当晚重扫后复活）。"长时间持续取码后整账号被拒"的触发阈值在上游，3 秒限速挡不住；脚本侧应摊开同一账号的取码时间。详见[公众号网页授权 code 与动态 AppID 防护](docs/h5-oauth-code.md)。
+
+## v0.2.66 - 2026-11-04
+
+- **新增公众号网页授权 code 接口 `POST /wx/h5code`（兼容入口 `/wxapp/getH5Code`）：** 用账号自己的 YYB 会话走命令 1254（`/cgi-bin/mmbiz-bin/oauth_authorize`）自动完成公众号网页授权，返回回跳里的 code。请求体带 `ref`、`app_id` 和 `payload.redirect_uri`（必填）、`scope`（默认 `snsapi_base`）、`state`（缺省自动生成）；响应 `result` 含 `code`、`state`、`scope`、`redirect_uri`、`mode:"h5_oauth_auto"`。依据：10-31 的隔离对照在同一份早期会话上真机验证过这条链路（业务 `ret=0`、32 位 code、回调与 state 严格匹配），另见 issue #75/#85/#87 的诉求。成功标准收紧：回复必须带显式业务状态 0，Location 的 scheme/host/path 必须与 `redirect_uri` 一致、`code`/`state` 各一次且 `state` 匹配；服务端不访问业务回调。
+- **为什么需要它：** H5/公众号脚本此前只能把公众号 AppID 塞进 `getCode`，上游按小程序流程返回"没有 code"，随后账号 OAuth 层被风控拒绝（11-03 的一对一对照与 issue #133 都是这一类），v0.2.63 只拦了两个已知网站应用 AppID。H5 脚本改走 `/wx/h5code` 后不再触发这条风控。
+- **H5 请求失败不恢复：** 业务拒绝与传输失败都原样返回给脚本，不强制刷新、不作废会话、不重放授权请求（确认授权会签发一次性 code，重放有副作用）；账号健康完全交给后台保活。限速、登录预算、熔断照常生效。
+- **动态自学习 AppID 黑名单：** 取码请求真正到达上游且重试后仍拿不到 code（网站应用/公众号特征）时，该 AppID 自动禁用并持久化（默认 1 次即禁用，`YYB_CODE_DYNAMIC_DENY_THRESHOLD` 可调），之后所有账号的这类请求本地 `403`，不再触达上游；未知 H5 AppID 至多损失一次请求。健康小程序的偶发失败在重试成功或后续成功时清零计数。`GET /api/appid-deny` 查看、`POST /api/appid-deny?app_id=wx…` 清除（面板登录态）；`YYB_CODE_ALLOW_APPIDS` 优先级最高，`YYB_CODE_DYNAMIC_DENY=0` 关闭学习。代价：上游抖动让健康小程序连续拿不到 code 时会被误禁，放行或清除即可恢复——默认值偏保守。详见[公众号网页授权 code 与动态 AppID 防护](docs/h5-oauth-code.md)。
+
 ## v0.2.65 - 2026-11-03
 
 - **新增 `YYB_FRESH_SESSION_WINDOW`：可缩短或关闭“刚成功后的 `-14` 不重新登录”保护（默认仍是 `2m`，行为不变）：** 这个保护自 v0.2.60 起写死为 2 分钟，没有开关。11-03 的实验室对照里，同一账号在 20 秒内连发 40 个不同小程序 AppID 的取码（失败后脚本式重试）：默认保护只拿到 1 个 code，118 次尝试里 108 次是本机直接回的 `429`（会话熔断 82、3 秒限速 26），9 次 `-14` 被保护放弃恢复；同一份代码把保护关掉后 40 个全部拿到（其中 39 次是先 `-14`、重新登录后成功，44 秒内完成），v0.2.35 也是 40 个；三个授权在 30 秒和 10 分钟后的刷新探测里都还活着。原因是这些账号的会话看起来用一次就要重新登录才能换下一个 AppID：保护把本来能修好的 `-14` 当成 AppID 自己被拒，随后会话熔断把三个不同 AppID 的 `-14` 当成整个会话被拒，暂停 15 分钟。
