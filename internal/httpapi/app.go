@@ -125,6 +125,9 @@ type App struct {
 	pool               *protocol.Pool
 	qr                 *qr.Client
 	refreshCredentials func(context.Context, protocol.LoginBufferCredentials) (protocol.LoginBufferCredentials, error)
+	// oauthH5Invoke lets tests stub the web-authorize call behind the
+	// /wx/oauth auto-exchange; nil means the real /wx/h5code invoke.
+	oauthH5Invoke wxappCall
 	checkLogin         func(context.Context, protocol.LoginBufferCredentials) (protocol.LoginBufferCredentials, error)
 	fetchLoginBuffer   func(context.Context, protocol.LoginBufferCredentials) (string, error)
 	exchangeAuthCode   func(context.Context, string) (protocol.LoginBufferResult, error)
@@ -438,6 +441,7 @@ func (a *App) Handler() http.Handler {
 	router.Any("/api/auth/profile", gin.WrapF(a.handleProfile))
 	router.Any("/api/scan-settings", gin.WrapF(a.handleScanSettings))
 	router.Any("/api/appid-deny", gin.WrapF(a.handleAppIDDeny))
+	router.Any("/api/fleet", gin.WrapF(a.handleFleetAPI))
 	router.Any("/api/auth/password", gin.WrapF(a.handlePassword))
 	router.Any("/api/auth/sessions", gin.WrapF(a.handleSessions))
 	router.Any("/api/auth/users", gin.WrapF(a.handleUsers))
@@ -1028,7 +1032,7 @@ func (a *App) invokeNamedWXOperation(ctx context.Context, body wxappRequest, api
 	if apiName == encryptKeyOperation {
 		body.Payload = normalizeEncryptKeyPayload(body.Payload)
 	}
-	result, err := a.invokeWXApp(withWXOperationContext(ctx, eventlog.OpOperateWXData), acc, body.AppID, body.Payload, a.invokeOperateWXData)
+	result, err := a.invokeWithFleet(withWXOperationContext(ctx, eventlog.OpOperateWXData), acc, body.AppID, body.Payload, a.invokeOperateWXData)
 	if err != nil {
 		return nil, err
 	}
@@ -1176,7 +1180,7 @@ func (a *App) callWXApp(w http.ResponseWriter, r *http.Request, requirePayload b
 	if !ok {
 		return
 	}
-	result, err := a.invokeWXApp(r.Context(), acc, body.AppID, body.Payload, call)
+	result, err := a.invokeWithFleet(r.Context(), acc, body.AppID, body.Payload, call)
 	if err != nil {
 		var expired accountExpiredError
 		switch {
