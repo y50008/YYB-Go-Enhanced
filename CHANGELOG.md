@@ -2,6 +2,27 @@
 
 本项目按实际提交时间记录主要功能变化，便于部署后确认版本内容。
 
+## v0.2.73 - 2026-11-04
+
+- **面板前端补齐 gameassist 渠道（后端早已就绪，此前的扫码入口只有 YYB/PCMgr 两个选项）：** 扫码页、一次性授权链接页、账号链接弹窗、扫码设置（个人/系统默认）的渠道下拉全部加入"GameAssist"；面板六处二元硬编码（账号列表渠道徽标、取码测试标签、合并/链接列表等）改走三渠道 `scanChannelName`/`scanChannelBadge` 助手并新增手柄图标，gameassist 账号不再被显示成 YYB。共享脚本移入 `<head>` 保证渲染前可用，静态资源缓存版本升至 v=049。
+
+## v0.2.72 - 2026-11-04
+
+- **修复 gameassist 换票提取顺序（实机定位，v0.2.71 流程缺陷）：** 逐跳指纹显示 `syzs_oauth` 302 已正确种下全部凭据 cookie（`openid/accesstoken/refreshtoken/logintype/scope/expires_in/appid/syzs_prefix`）再跳官方 `login_result.html`，但 HTML 正文令 JSON 解析先报错短路，cookie 提取代码根本没执行到。现在三种来源（JSON 信封 / jar / 逐跳 Set-Cookie / HTML 字面量）统一先尝试、全部落空才报诊断指纹；cookie 提取补齐 `scope`（容忍 `%2C` 转义）与 `expires_in`（无信号时回退约 30 天窗口，避免账号生而过期）。
+
+## v0.2.71 - 2026-11-04
+
+- **gameassist 换票逐跳捕获 cookie（实机定位）：** 形态指纹显示换票 302 链正常终结在官方 `login_result.html`（len=2322 与该静态页完全一致），但凭据 cookie 在中间跳的 Set-Cookie 上、会话 jar 跨域没收住。ExchangeCode 现在用逐跳记录传输层抓取**每一跳**的 Set-Cookie 并按名提取凭据（不再依赖 jar 的跨域语义），同时回调请求补上官方浏览器形态的 Referer/Chrome UA；失败指纹改为整条重定向链（每跳状态+脱敏 URL+Set-Cookie 名单）。
+
+## v0.2.70 - 2026-11-04
+
+- **gameassist 换票第二跳适配（实机推进）：** 数字 state 修复后，`syzs_oauth` 对有效 code 不再返回 JSON 信封，而是官方流程中的 HTML 中转跳（凭据经 .qq.com cookie 交给 `login_result.html`）。ExchangeCode 现在按三种形态收尾：JSON 信封 / 会话 jar 里的 cookie / **HTML 中转页里的 `document.cookie`/`setCookie` 字面量**；解析失败时报错只带形态指纹（HTTP 状态、Content-Type、长度、Set-Cookie 名单、脱敏后的最终 URL），绝不带正文，防止凭据进日志。
+
+## v0.2.69 - 2026-11-04
+
+- **修复 gameassist 扫码换票被拒（实机定位）：state 必须是数字。** 首次生产扫码授权成功后 `syzs_oauth` 返回 `-109 RC_PARAMS_INVALID`；用假 code 做参数矩阵探测，`state=web` 稳定复现 -109，而 `state=49.57735723381141`（官方客户端 JS `state=100*Math.random()` 的形状）立即推进到 `-107 RC_NO_AUTH_ERR`（与 pcyyb_oauth 假 code 的"码无效"层一致）。现在扫码会话生成官方形状的随机浮点 state 并原样带到回调换取；非数字 state 在本地直接拒绝。
+- **扫码确认吸收电脑管家票据的瞬态拒绝：** 首次生产扫码接入 pcmgr 账号时，刚换到的 loginkey 立刻调原生 20138 得 `code=6`，约一分钟后手动重试同一凭据成功——是签发侧到原生网关的传播延迟。现在确认阶段的 8 秒重试窗口把 `pcmgr.BufferRejectedError` 一并纳入（重试不轮换 key、不重放 OAuth），扫码确认不再需要手动补一次。
+
 ## v0.2.68 - 2026-11-04
 
 - **新增腾讯手游助手（GameAssist）扫码渠道 `gameassist`：** 第三条客户端凭据链。逆向实证（详见[手游助手渠道接入复核](docs/gameassist-protocol-20261104.md)）：手游助手 6.10 是应用宝 Androws 源码树改版，WMPF host_appid 同为 `wxd44977328b36e647`、ilink 取码栈同构，差异只在凭据签发——OAuth appid `wxef99873dbfab493c`、回调 `yybadaccess.3g.qq.com/syzslogin/syzs_oauth` 换取 `{openId, accessToken "1_…", refreshToken}`（camelCase 信封，同网关同结构已由探测证实），之后复用与 appstore 完全相同的 `pcyyb_get_wx_login_buffer_auth` 换 login_buffer。新包 `internal/gameassist` 兼容 camelCase/snake_case/cookie 三种签发形态并校验 `snsapi_runtime_pcsdk` scope；`product=gameassist` 贯通扫码、面板、OpenAPI 枚举、事件渠道、离线通知与账号渠道展示。刷新走默认 `pc_yyb` 主路由（`-109` 自动转 check-login），初扫约 30 天窗口、首次刷新后收敛为网关 `expires_in`。
