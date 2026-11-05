@@ -16,7 +16,7 @@
 
 | 文档 | 内容 |
 | --- | --- |
-| [控制台与账号管理](console-features.md) | 账号工作台、扫码渠道（YYB / PCMgr）、合并账号、接口测试、运行日志、检查更新 |
+| [控制台与账号管理](console-features.md) | 账号工作台、扫码渠道（YYB / PCMgr / GameAssist）、多渠道账号、合并账号、接口测试、运行日志、检查更新 |
 | [面板接入与排错](panel-integration.md) | 青龙、呆呆、Arcadia、同步 `YYB_SERVER`、账号运行管理、脚本拉取、跨服务器排错 |
 | [协议接口说明](protocol-api.md) | `/wxapp/*` 与 `/wx/*` 接口、`wx.login` code、`operateWxData`、公众号 OAuth、能力边界与错误定位 |
 | [代理与账号保活](proxy-keepalive.md) | 静态 / 动态代理、品赞、巨量、地区匹配、自动保活与失效排查 |
@@ -43,6 +43,8 @@
 | [旧版与当前版的完整链路对照](old-vs-new-chain-20261101.md) | 旧版与当前版的源码对照与待完成的工作负载对照 |
 
 ## 协议与上游调查记录
+
+新增调查：[渠道 2/5 来源、官方下载安装包、QQ 浏览器登录接口与接入边界](scan-channel-research-20261105.md)。
 
 | 文档 | 内容 |
 | --- | --- |

@@ -117,12 +117,20 @@ CREATE TABLE IF NOT EXISTS account_links (
     token_ciphertext TEXT   NOT NULL DEFAULT '',
     target_product TEXT    NOT NULL DEFAULT '',
     switch_confirmed INTEGER NOT NULL DEFAULT 0,
+    allow_multi_channel INTEGER NOT NULL DEFAULT 0,
+    multi_primary_id INTEGER REFERENCES wechat_accounts(id) ON DELETE CASCADE,
     expires_at      INTEGER NOT NULL,
     used_at         INTEGER,
     revoked_at      INTEGER,
     created_at      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_account_links_expires ON account_links(expires_at);
+CREATE TABLE IF NOT EXISTS account_link_scans (
+    link_id INTEGER NOT NULL REFERENCES account_links(id) ON DELETE CASCADE,
+    product TEXT NOT NULL,
+    account_id INTEGER NOT NULL REFERENCES wechat_accounts(id) ON DELETE CASCADE,
+    PRIMARY KEY(link_id, product)
+);
 `
 
 var defaultFeatures = []Feature{
@@ -254,6 +262,8 @@ func migrateAccountLinks(ctx context.Context, db *sql.DB) error {
 		{"revoked_at", "INTEGER"},
 		{"target_product", "TEXT NOT NULL DEFAULT ''"},
 		{"switch_confirmed", "INTEGER NOT NULL DEFAULT 0"},
+		{"allow_multi_channel", "INTEGER NOT NULL DEFAULT 0"},
+		{"multi_primary_id", "INTEGER REFERENCES wechat_accounts(id) ON DELETE CASCADE"},
 	} {
 		exists, err := sqliteColumnExists(ctx, db, "account_links", column.name)
 		if err != nil {
@@ -576,7 +586,6 @@ func (db *DB) FleetMembers(ctx context.Context, primaryID int64) ([]*WechatAccou
 	return out, rows.Err()
 }
 
-
 func (db *DB) ListAccounts(ctx context.Context) ([]*WechatAccount, error) {
 	rows, err := db.sql.QueryContext(ctx, selectAccountSQL+" ORDER BY id")
 	if err != nil {
@@ -661,11 +670,11 @@ func (db *DB) DeleteIncompleteAccounts(ctx context.Context, ids []int64) ([]int6
 		if !account.IsIncomplete() {
 			continue
 		}
-		result, deleteErr := tx.ExecContext(ctx, "DELETE FROM wechat_accounts WHERE id=?", id)
+		deleted, deleteErr := deleteAccountRow(ctx, tx, id)
 		if deleteErr != nil {
 			return nil, deleteErr
 		}
-		if affected, _ := result.RowsAffected(); affected == 1 {
+		if deleted {
 			removed = append(removed, id)
 		}
 	}
@@ -731,8 +740,14 @@ func (db *DB) CompactAccountIDs(ctx context.Context) (map[int64]int64, error) {
 		{"account_push_settings", "account_id"},
 		{"account_proxy_settings", "account_id"},
 		{"account_links", "account_id"},
+		{"account_links", "multi_primary_id"},
+		{"account_link_scans", "account_id"},
 	}
 	for oldID := range mapping {
+		// Fleets point at their primary by ID, so the pointer moves with it.
+		if _, err = tx.ExecContext(ctx, "UPDATE wechat_accounts SET fleet_primary_id=? WHERE fleet_primary_id=?", -oldID, oldID); err != nil {
+			return nil, err
+		}
 		for _, child := range childTables {
 			if _, err = tx.ExecContext(ctx, "UPDATE "+child.table+" SET "+child.column+"=? WHERE "+child.column+"=?", -oldID, oldID); err != nil {
 				return nil, err
@@ -744,6 +759,9 @@ func (db *DB) CompactAccountIDs(ctx context.Context) (map[int64]int64, error) {
 	}
 	for oldID, newID := range mapping {
 		if _, err = tx.ExecContext(ctx, "UPDATE wechat_accounts SET id=? WHERE id=?", newID, -oldID); err != nil {
+			return nil, err
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE wechat_accounts SET fleet_primary_id=? WHERE fleet_primary_id=?", newID, -oldID); err != nil {
 			return nil, err
 		}
 		for _, child := range childTables {
@@ -923,13 +941,78 @@ func (db *DB) DeleteAccount(ctx context.Context, id int64) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, "DELETE FROM wechat_accounts WHERE id=?", id); err != nil {
+	if _, err = deleteAccountRow(ctx, tx, id); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, "DELETE FROM app_settings WHERE key=?", accountReferenceKey(id)); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// deleteAccountRow removes one account row and keeps its fleet consistent in
+// the same transaction. Account IDs are reused after a delete, so a member left
+// pointing at a removed primary could later be adopted by an unrelated new
+// account. Members of a removed primary move to the lowest remaining ID; a fleet
+// left with a single account is dissolved.
+func deleteAccountRow(ctx context.Context, tx *sql.Tx, id int64) (bool, error) {
+	var formerPrimary sql.NullInt64
+	if err := tx.QueryRowContext(ctx, "SELECT fleet_primary_id FROM wechat_accounts WHERE id=?", id).Scan(&formerPrimary); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	result, err := tx.ExecContext(ctx, "DELETE FROM wechat_accounts WHERE id=?", id)
+	if err != nil {
+		return false, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return false, nil
+	}
+	return true, repairFleetAfterDelete(ctx, tx, id, formerPrimary)
+}
+
+func repairFleetAfterDelete(ctx context.Context, tx *sql.Tx, removedID int64, formerPrimary sql.NullInt64) error {
+	// A removed primary: its members move to the lowest remaining ID.
+	rows, err := tx.QueryContext(ctx, "SELECT id FROM wechat_accounts WHERE fleet_primary_id=? ORDER BY id", removedID)
+	if err != nil {
+		return err
+	}
+	var orphans []int64
+	for rows.Next() {
+		var member int64
+		if err = rows.Scan(&member); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		orphans = append(orphans, member)
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+	switch {
+	case len(orphans) == 1:
+		if _, err = tx.ExecContext(ctx, "UPDATE wechat_accounts SET fleet_primary_id=NULL WHERE id=?", orphans[0]); err != nil {
+			return err
+		}
+	case len(orphans) > 1:
+		if _, err = tx.ExecContext(ctx, "UPDATE wechat_accounts SET fleet_primary_id=? WHERE fleet_primary_id=?", orphans[0], removedID); err != nil {
+			return err
+		}
+	}
+	// A removed member: a fleet that is left with one account is dissolved.
+	if formerPrimary.Valid && formerPrimary.Int64 != removedID {
+		var left int
+		if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM wechat_accounts WHERE id=? OR fleet_primary_id=?", formerPrimary.Int64, formerPrimary.Int64).Scan(&left); err != nil {
+			return err
+		}
+		if left <= 1 {
+			if _, err = tx.ExecContext(ctx, "UPDATE wechat_accounts SET fleet_primary_id=NULL WHERE id=? OR fleet_primary_id=?", formerPrimary.Int64, formerPrimary.Int64); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (db *DB) GetSession(ctx context.Context, accountID int64, tcpProxy string) (*SessionRow, error) {
